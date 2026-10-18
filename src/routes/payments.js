@@ -26,6 +26,9 @@ import {
 
 const router = Router()
 
+const CUSTOMER_CARE_EMAIL = 'customercare@xaaj.in'
+const CUSTOMER_CARE_PHONE = '+91 9899446117'
+
 
 // ============================================================
 // CREATE RAZORPAY ORDER
@@ -763,6 +766,7 @@ router.post(
 
 
     let order = null
+    let wasAlreadyPaid = false
 
 
     try {
@@ -857,6 +861,8 @@ router.post(
             'paid'
 
           ) {
+
+            wasAlreadyPaid = true
 
             return
 
@@ -1232,146 +1238,110 @@ router.post(
 
     // ========================================================
     // PAYMENT CONFIRMATION EMAIL
+    // Use the same XAAJ template as COD, only after Razorpay
+    // signature and database payment verification succeed.
     // ========================================================
 
     const customerEmail =
-
       order.shippingAddress?.email ||
-
       order.user?.email
 
-
     const customerName =
-
       order.shippingAddress?.name ||
-
       order.user?.name ||
-
       'Customer'
 
+    const orderNumber = String(order._id).slice(-8).toUpperCase()
 
-    if (customerEmail) {
+    // Escape dynamic values before inserting them into HTML.
+    const escapeHtml = value =>
+      String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[character])
 
-      await sendEmail({
+    const productRows = (order.items || []).map(item => `
+      <tr>
+        <td style="padding:12px 8px;border-bottom:1px solid #eee;">
+          ${escapeHtml(item.name || 'Product')}
+        </td>
+        <td style="padding:12px 8px;border-bottom:1px solid #eee;text-align:center;">
+          ${Number(item.quantity || 0)}
+        </td>
+        <td style="padding:12px 8px;border-bottom:1px solid #eee;text-align:right;white-space:nowrap;">
+          ₹${(Number(item.price || 0) * Number(item.quantity || 0)).toLocaleString('en-IN')}
+        </td>
+      </tr>
+    `).join('')
 
-        to:
+    const address = order.shippingAddress || {}
 
-          customerEmail,
-
-        subject:
-
-          'XAAJ - Payment Confirmed',
-
-        html: `
-
-          <div style="
-
-            font-family:Arial,sans-serif;
-
-            line-height:1.6;
-
-            max-width:600px;
-
-            margin:auto;
-
-            padding:20px;
-
-          ">
-
-            <h2>
-
-              Thank you for your order! 🎉
-
-            </h2>
-
-            <p>
-
-              Hi
-
-              <strong>
-
-                ${customerName}
-
-              </strong>,
-
-            </p>
-
-            <p>
-
-              Your payment has been
-
-              successfully received.
-
-            </p>
-
-            <p>
-
-              <strong>
-
-                Order ID:
-
-              </strong>
-
-              ${order._id}
-
-            </p>
-
-            <p>
-
-              <strong>
-
-                Payment ID:
-
-              </strong>
-
-              ${paymentId}
-
-            </p>
-
-            <p>
-
-              <strong>
-
-                Order Total:
-
-              </strong>
-
-              ₹${order.total}
-
-            </p>
-
-            <p>
-
-              Your order is now
-
-              <strong>
-
-                confirmed
-
-              </strong>
-
-              and will be processed shortly.
-
-            </p>
-
-            <p>
-
-              Thank you for shopping with
-
-              <strong>
-
-                XAAJ
-
-              </strong>.
-
-            </p>
-
-          </div>
-
-        `
-
-      })
-
+    if (customerEmail && !wasAlreadyPaid) {
+      try {
+        await sendEmail({
+          to: customerEmail,
+          subject: `XAAJ - Your Order Has Been Successfully Placed (#${orderNumber})`,
+          html: `
+            <!doctype html>
+            <html lang="en">
+            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Your XAAJ order is confirmed</title></head>
+            <body style="margin:0;padding:0;background:#f7f4ef;font-family:Arial,Helvetica,sans-serif;color:#39352f;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f7f4ef;"><tr><td align="center" style="padding:28px 12px;">
+                <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;background:#ffffff;">
+                  <tr><td align="center" style="padding:30px 24px 24px;border-bottom:1px solid #e8e0d6;">
+                    <div style="font-family:Georgia,'Times New Roman',serif;font-size:34px;letter-spacing:8px;line-height:1.2;">XAAJ</div>
+                    <div style="font-size:10px;letter-spacing:3px;color:#8b6252;margin-top:8px;">STORIES CRAFTED IN EARTH</div>
+                  </td></tr>
+                  <tr><td align="center" style="padding:38px 32px 14px;">
+                    <div style="font-size:11px;letter-spacing:2.5px;color:#9a6550;text-transform:uppercase;">Order confirmed</div>
+                    <h1 style="font-family:Georgia,'Times New Roman',serif;font-size:30px;font-weight:normal;line-height:1.25;color:#39352f;margin:14px 0 12px;">A Little Beauty Is on Its Way!</h1>
+                    <p style="font-size:15px;line-height:1.8;color:#625c54;margin:0;">Dear ${escapeHtml(customerName)},</p>
+                    <p style="font-size:15px;line-height:1.8;color:#625c54;margin:12px 0 0;">Thank you for choosing XAAJ. We're delighted to be a part of your home.</p>
+                    <p style="font-size:15px;line-height:1.8;color:#625c54;margin:12px 0 0;">Your order <strong style="color:#39352f;">#${escapeHtml(orderNumber)}</strong> is confirmed, and we're getting your thoughtfully chosen pieces ready for their journey to you.</p>
+                    <p style="font-size:14px;line-height:1.8;color:#625c54;margin:12px 0 0;">Your Razorpay payment has been successfully verified.</p>
+                  </td></tr>
+                  <tr><td style="padding:22px 32px 8px;">
+                    <h2 style="font-family:Georgia,'Times New Roman',serif;font-size:21px;font-weight:normal;color:#39352f;margin:0 0 16px;">Your order summary</h2>
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;line-height:1.6;color:#625c54;border-collapse:collapse;">
+                      <tr style="background:#f7f4ef;"><th align="left" style="padding:10px 8px;font-weight:normal;">Product</th><th align="center" style="padding:10px 8px;font-weight:normal;">Qty</th><th align="right" style="padding:10px 8px;font-weight:normal;">Amount</th></tr>
+                      <tbody>${productRows}</tbody>
+                      <tr><td colspan="3" style="padding:10px 0;border-top:1px solid #eee7df;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;line-height:1.6;color:#625c54;">
+                        <tr><td>Subtotal</td><td align="right">₹${Number(order.subtotal || 0).toLocaleString('en-IN')}</td></tr>
+                        <tr><td style="padding-top:7px;">Discount</td><td align="right" style="padding-top:7px;">−₹${Number(order.discount || 0).toLocaleString('en-IN')}</td></tr>
+                        <tr><td style="padding-top:7px;">Shipping</td><td align="right" style="padding-top:7px;">${Number(order.shippingFee || 0) === 0 ? 'FREE' : `₹${Number(order.shippingFee || 0).toLocaleString('en-IN')}`}</td></tr>
+                        <tr><td style="padding-top:12px;font-size:16px;font-weight:bold;color:#39352f;border-top:1px solid #eee7df;">Total</td><td align="right" style="padding-top:12px;font-size:16px;font-weight:bold;color:#39352f;border-top:1px solid #eee7df;">₹${Number(order.total || 0).toLocaleString('en-IN')}</td></tr>
+                      </table></td></tr>
+                    </table>
+                  </td></tr>
+                  <tr><td align="center" style="padding:26px 32px 12px;">
+                    <div style="display:inline-block;background:#8b5140;color:#ffffff;font-size:12px;letter-spacing:1.5px;padding:15px 28px;">ORDER #${escapeHtml(orderNumber)}</div>
+                  </td></tr>
+                  <tr><td style="padding:24px 32px 8px;">
+                    <h2 style="font-family:Georgia,'Times New Roman',serif;font-size:21px;font-weight:normal;color:#39352f;margin:0 0 12px;">Delivery details</h2>
+                    <div style="font-size:14px;line-height:1.8;color:#625c54;">${escapeHtml(address.name || customerName)}<br>${escapeHtml(address.address || '')}<br>${escapeHtml([address.city, address.state].filter(Boolean).join(', '))}${address.pin ? ` — ${escapeHtml(address.pin)}` : ''}<br>Phone: ${escapeHtml(address.phone || '')}</div>
+                    <p style="font-size:14px;line-height:1.8;color:#625c54;margin:14px 0 0;">We'll notify you as soon as your order is dispatched, along with tracking details so you can follow its journey home.</p>
+                  </td></tr>
+                  <tr><td align="center" style="padding:30px 32px 34px;">
+                    <p style="font-family:Georgia,'Times New Roman',serif;font-size:21px;line-height:1.5;color:#39352f;margin:0 0 8px;">Until then, let the anticipation begin.</p>
+                    <p style="font-size:14px;line-height:1.8;color:#625c54;margin:0;">With warmth,<br><strong style="color:#39352f;">Team XAAJ</strong></p>
+                    <div style="font-size:10px;letter-spacing:2px;color:#9a6550;margin-top:14px;">STORIES CRAFTED IN EARTH</div>
+                  </td></tr>
+                  <tr><td align="center" style="padding:22px 24px;background:#f3eee7;border-top:1px solid #e8e0d6;">
+                    <div style="font-size:12px;letter-spacing:1.5px;color:#8b5140;">XAAJ · STORES CRAFTED IN EARTH</div>
+                    <p style="font-size:12px;line-height:1.7;color:#756e65;margin:12px 0 0;">Questions about your order? Contact us at <a href="mailto:${CUSTOMER_CARE_EMAIL}" style="color:#8b5140;text-decoration:underline;">${CUSTOMER_CARE_EMAIL}</a> or ${CUSTOMER_CARE_PHONE}.</p>
+                  </td></tr>
+                </table>
+              </td></tr></table>
+            </body></html>
+          `
+        })
+      } catch (emailError) {
+        // Email failure must not undo a successfully verified payment/order.
+        console.error('[EMAIL] Prepaid order confirmation failed:', emailError?.message || emailError)
+      }
     }
 
 
