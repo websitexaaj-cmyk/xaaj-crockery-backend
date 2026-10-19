@@ -68,7 +68,8 @@ const PRODUCT_SUBCATEGORIES = {
 
     'Tea Set',
 
-    'Tea Cup Set'
+    'Tea Cup Set',
+    'Serving Set'
 
   ]
 

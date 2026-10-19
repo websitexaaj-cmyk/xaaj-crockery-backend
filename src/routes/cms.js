@@ -1399,6 +1399,376 @@ router.delete(
 )
 
 // ==========================================================
+// HORECA CATALOGUE - COLLECTIONS + PRODUCTS CRUD
+//
+// These records are stored in the existing CMS collection using
+// dedicated metadata.section values. This keeps the existing
+// ecommerce Product model and checkout logic untouched.
+//
+// Public:
+// GET /api/cms/horeca/catalogue
+// GET /api/cms/horeca/catalogue/collections
+// GET /api/cms/horeca/catalogue/products
+//
+// Admin (protect + adminOnly):
+// GET    /api/cms/horeca/catalogue/admin
+// POST   /api/cms/horeca/catalogue/collections
+// PATCH  /api/cms/horeca/catalogue/collections/:id
+// DELETE /api/cms/horeca/catalogue/collections/:id
+// POST   /api/cms/horeca/catalogue/products
+// PATCH  /api/cms/horeca/catalogue/products/:id
+// DELETE /api/cms/horeca/catalogue/products/:id
+// ==========================================================
+
+const HORECA_COLLECTION_SECTION = 'horeca-catalogue-collection'
+const HORECA_PRODUCT_SECTION = 'horeca-catalogue-product'
+
+const cleanText = (value, maxLength = 250) =>
+  String(value ?? '').trim().slice(0, maxLength)
+
+const cleanSlug = value =>
+  cleanText(value, 180)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+const normalizeHorecaRecord = (doc, kind) => {
+  const metadata = doc?.metadata || {}
+  return {
+    id: String(doc?._id || ''),
+    name: doc?.title || metadata.name || '',
+    title: doc?.title || metadata.name || '',
+    slug: metadata.slug || cleanSlug(doc?.title || ''),
+    description: doc?.description || metadata.description || '',
+    image: doc?.image || metadata.image || '',
+    imageUrl: doc?.image || metadata.image || '',
+    code: metadata.code || '',
+    size: metadata.size || '',
+    category: metadata.category || '',
+    collection: metadata.collection || '',
+    collectionSlug: metadata.collectionSlug || '',
+    enabled: doc?.enabled !== false && doc?.isActive !== false,
+    isActive: doc?.isActive !== false && doc?.enabled !== false,
+    order: Number.isFinite(doc?.order) ? doc.order : 0,
+    type: kind
+  }
+}
+
+const horecaCollectionFilter = {
+  type: 'settings',
+  'metadata.section': HORECA_COLLECTION_SECTION
+}
+
+const horecaProductFilter = {
+  type: 'settings',
+  'metadata.section': HORECA_PRODUCT_SECTION
+}
+
+const validateHorecaRecord = (body, kind) => {
+  const name = cleanText(body?.name || body?.title, 150)
+  const description = cleanText(body?.description, 2000)
+  const image = cleanText(body?.image || body?.imageUrl, 1000)
+  const slug = cleanSlug(body?.slug || name)
+
+  if (!name || name.length < 2) {
+    const error = new Error(`${kind} name must contain at least 2 characters.`)
+    error.statusCode = 422
+    throw error
+  }
+
+  if (!slug) {
+    const error = new Error(`${kind} slug is required.`)
+    error.statusCode = 422
+    throw error
+  }
+
+  if (image) {
+    let parsed
+    try {
+      parsed = new URL(image)
+    } catch {
+      const error = new Error('Image URL must be a valid http(s) URL.')
+      error.statusCode = 422
+      throw error
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      const error = new Error('Image URL must use http or https.')
+      error.statusCode = 422
+      throw error
+    }
+  }
+
+  return {
+    name,
+    title: name,
+    slug,
+    description,
+    image,
+    code: cleanText(body?.code, 80),
+    size: cleanText(body?.size, 80),
+    category: cleanText(body?.category, 100),
+    collection: cleanText(body?.collection, 150),
+    collectionSlug: cleanSlug(body?.collectionSlug || body?.collection || ''),
+    enabled: body?.enabled !== false && body?.isActive !== false,
+    order: Number.isFinite(Number(body?.order)) ? Number(body.order) : 0
+  }
+}
+
+const saveHorecaRecord = async ({ kind, body, existingId = null }) => {
+  const section = kind === 'collection'
+    ? HORECA_COLLECTION_SECTION
+    : HORECA_PRODUCT_SECTION
+  const filter = { type: 'settings', 'metadata.section': section }
+  const data = validateHorecaRecord(body, kind)
+  const duplicate = await Content.findOne({
+    ...filter,
+    'metadata.slug': data.slug,
+    ...(existingId ? { _id: { $ne: existingId } } : {})
+  }).lean()
+
+  if (duplicate) {
+    const error = new Error(`A ${kind} with this slug already exists.`)
+    error.statusCode = 409
+    throw error
+  }
+
+  const update = {
+    $set: {
+      type: 'settings',
+      title: data.name,
+      description: data.description,
+      image: data.image,
+      enabled: data.enabled,
+      isActive: data.enabled,
+      order: data.order,
+      startsAt: null,
+      endsAt: null,
+      metadata: {
+        section,
+        slug: data.slug,
+        name: data.name,
+        description: data.description,
+        image: data.image,
+        code: data.code,
+        size: data.size,
+        category: data.category,
+        collection: data.collection,
+        collectionSlug: data.collectionSlug
+      }
+    }
+  }
+
+  if (existingId) {
+    return Content.findOneAndUpdate(
+      { ...filter, _id: existingId },
+      update,
+      { new: true, runValidators: true }
+    )
+  }
+
+  return Content.create(update.$set)
+}
+
+// Public catalogue response: only active records are visible on the website.
+router.get(
+  '/horeca/catalogue',
+  asyncHandler(async (_req, res) => {
+    const [collections, products] = await Promise.all([
+      Content.find({ ...horecaCollectionFilter, isActive: true, enabled: { $ne: false } })
+        .sort({ order: 1, createdAt: 1 }).lean(),
+      Content.find({ ...horecaProductFilter, isActive: true, enabled: { $ne: false } })
+        .sort({ order: 1, createdAt: 1 }).lean()
+    ])
+
+    res.json({
+      success: true,
+      data: {
+        collections: collections.map(item => normalizeHorecaRecord(item, 'collection')),
+        products: products.map(item => normalizeHorecaRecord(item, 'product'))
+      }
+    })
+  })
+)
+
+router.get(
+  '/horeca/catalogue/collections',
+  asyncHandler(async (_req, res) => {
+    const items = await Content.find({
+      ...horecaCollectionFilter,
+      isActive: true,
+      enabled: { $ne: false }
+    }).sort({ order: 1, createdAt: 1 }).lean()
+
+    res.json({ success: true, data: items.map(item => normalizeHorecaRecord(item, 'collection')) })
+  })
+)
+
+router.get(
+  '/horeca/catalogue/products',
+  asyncHandler(async (req, res) => {
+    const filter = {
+      ...horecaProductFilter,
+      isActive: true,
+      enabled: { $ne: false }
+    }
+    const collectionSlug = cleanSlug(req.query?.collection || '')
+    if (collectionSlug) filter['metadata.collectionSlug'] = collectionSlug
+
+    const items = await Content.find(filter).sort({ order: 1, createdAt: 1 }).lean()
+    res.json({ success: true, data: items.map(item => normalizeHorecaRecord(item, 'product')) })
+  })
+)
+
+// Admin can see both active and inactive records.
+router.get(
+  '/horeca/catalogue/admin',
+  protect,
+  adminOnly,
+  asyncHandler(async (_req, res) => {
+    const [collections, products] = await Promise.all([
+      Content.find(horecaCollectionFilter).sort({ order: 1, createdAt: 1 }).lean(),
+      Content.find(horecaProductFilter).sort({ order: 1, createdAt: 1 }).lean()
+    ])
+
+    res.json({
+      success: true,
+      data: {
+        collections: collections.map(item => normalizeHorecaRecord(item, 'collection')),
+        products: products.map(item => normalizeHorecaRecord(item, 'product'))
+      }
+    })
+  })
+)
+
+router.post(
+  '/horeca/catalogue/collections',
+  protect,
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const item = await saveHorecaRecord({ kind: 'collection', body: req.body || {} })
+    res.status(201).json({
+      success: true,
+      message: 'HoReCa collection created successfully.',
+      data: normalizeHorecaRecord(item, 'collection')
+    })
+  })
+)
+
+router.patch(
+  '/horeca/catalogue/collections/:id',
+  protect,
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const item = await saveHorecaRecord({ kind: 'collection', body: req.body || {}, existingId: req.params.id })
+    if (!item) return res.status(404).json({ success: false, message: 'HoReCa collection not found.' })
+    res.json({ success: true, message: 'HoReCa collection updated successfully.', data: normalizeHorecaRecord(item, 'collection') })
+  })
+)
+
+router.delete(
+  '/horeca/catalogue/collections/:id',
+  protect,
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const item = await Content.findOneAndDelete({ ...horecaCollectionFilter, _id: req.params.id })
+    if (!item) return res.status(404).json({ success: false, message: 'HoReCa collection not found.' })
+    res.json({ success: true, message: 'HoReCa collection deleted successfully.' })
+  })
+)
+
+router.post(
+  '/horeca/catalogue/products',
+  protect,
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const item = await saveHorecaRecord({ kind: 'product', body: req.body || {} })
+    res.status(201).json({
+      success: true,
+      message: 'HoReCa product created successfully.',
+      data: normalizeHorecaRecord(item, 'product')
+    })
+  })
+)
+
+router.patch(
+  '/horeca/catalogue/products/:id',
+  protect,
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const item = await saveHorecaRecord({ kind: 'product', body: req.body || {}, existingId: req.params.id })
+    if (!item) return res.status(404).json({ success: false, message: 'HoReCa product not found.' })
+    res.json({ success: true, message: 'HoReCa product updated successfully.', data: normalizeHorecaRecord(item, 'product') })
+  })
+)
+
+router.delete(
+  '/horeca/catalogue/products/:id',
+  protect,
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const item = await Content.findOneAndDelete({ ...horecaProductFilter, _id: req.params.id })
+    if (!item) return res.status(404).json({ success: false, message: 'HoReCa product not found.' })
+    res.json({ success: true, message: 'HoReCa product deleted successfully.' })
+  })
+)
+
+// ==========================================================
+// BACKWARD-COMPATIBLE HORECA CATALOGUE URL ALIASES
+// Supports the frontend URL seen in the browser:
+// /api/cms/horeca-catalogue/products
+// Existing /horeca/catalogue/* routes remain unchanged.
+// ==========================================================
+
+router.get(
+  '/horeca-catalogue',
+  asyncHandler(async (_req, res) => {
+    const [collections, products] = await Promise.all([
+      Content.find({ ...horecaCollectionFilter, isActive: true, enabled: { $ne: false } })
+        .sort({ order: 1, createdAt: 1 }).lean(),
+      Content.find({ ...horecaProductFilter, isActive: true, enabled: { $ne: false } })
+        .sort({ order: 1, createdAt: 1 }).lean()
+    ])
+
+    res.json({
+      success: true,
+      data: {
+        collections: collections.map(item => normalizeHorecaRecord(item, 'collection')),
+        products: products.map(item => normalizeHorecaRecord(item, 'product'))
+      }
+    })
+  })
+)
+
+router.get(
+  '/horeca-catalogue/collections',
+  asyncHandler(async (_req, res) => {
+    const items = await Content.find({
+      ...horecaCollectionFilter,
+      isActive: true,
+      enabled: { $ne: false }
+    }).sort({ order: 1, createdAt: 1 }).lean()
+
+    res.json({ success: true, data: items.map(item => normalizeHorecaRecord(item, 'collection')) })
+  })
+)
+
+router.get(
+  '/horeca-catalogue/products',
+  asyncHandler(async (req, res) => {
+    const filter = {
+      ...horecaProductFilter,
+      isActive: true,
+      enabled: { $ne: false }
+    }
+    const collectionSlug = cleanSlug(req.query?.collection || '')
+    if (collectionSlug) filter['metadata.collectionSlug'] = collectionSlug
+
+    const items = await Content.find(filter).sort({ order: 1, createdAt: 1 }).lean()
+    res.json({ success: true, data: items.map(item => normalizeHorecaRecord(item, 'product')) })
+  })
+)
+
+// ==========================================================
 // EXPORT ROUTER
 // ==========================================================
 

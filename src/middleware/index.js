@@ -310,7 +310,7 @@ export const productSchema = z.object({
 
         .regex(
 
-          /^[a-z0-9]+(?:-[a-z0-9]+)\*$/,
+          /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
 
           'Product slug can contain only lowercase letters, numbers and hyphens'
 
@@ -372,7 +372,9 @@ export const productSchema = z.object({
 
         'Tea Set',
 
-        'Tea Cup Set'
+        'Tea Cup Set',
+            'Serving Set'
+
 
       ])
 
@@ -900,7 +902,8 @@ export const productSchema = z.object({
 
         'Tea Set',
 
-        'Tea Cup Set'
+        'Tea Cup Set',
+          'Serving Set'
 
       ]
 

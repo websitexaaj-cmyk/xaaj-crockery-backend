@@ -80,7 +80,8 @@ const productSchema = new mongoose.Schema(
         'Serving Bowl',
         'Serving Platter',
         'Tea Set',
-        'Tea Cup Set'
+        'Tea Cup Set',
+         'Serving Set' 
       ],
       default: '',
       trim: true
@@ -255,7 +256,8 @@ productSchema.pre('validate', function validateSubcategory() {
 
     Gifting: [
       'Tea Set',
-      'Tea Cup Set'
+      'Tea Cup Set',
+      'Serving Set'
     ]
   }
 
