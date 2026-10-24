@@ -44,6 +44,7 @@ import adminRoutes from './routes/admin.js'
 import paymentRoutes from './routes/payments.js'
 import uploadRoutes from './routes/uploads.js'
 import reviewRoutes from './routes/reviews.js'
+import offerRoutes from './routes/Offer.js'
 
 // -------------------------
 // 5. Middleware
@@ -358,6 +359,17 @@ app.use(
   '/api/commerce',
   writeLimiter,
   commerceRoutes
+)
+
+
+// ============================================================
+// Offers
+// ============================================================
+
+app.use(
+  '/api/offers',
+  writeLimiter,
+  offerRoutes
 )
 
 

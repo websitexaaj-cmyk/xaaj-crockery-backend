@@ -6,6 +6,8 @@ import User from '../models/User.js'
 
 import Order from '../models/Order.js'
 
+import Offer from '../models/Offer.js'
+
 import {
 
   asyncHandler,
@@ -27,6 +29,65 @@ import {
 } from '../services/velocity.js'
 
 const router = Router()
+
+
+// Calculate the best eligible automatic offer on the server.
+// Kept in this file so no additional helper module is required.
+const calculateAutomaticOfferDiscount = (items, offers, now = new Date()) => {
+  const cartItems = (items || []).map(item => ({
+    id: String(item.product?._id || item.product || ''),
+    quantity: Math.max(1, Number(item.quantity || 1)),
+    price: Math.max(0, Number(item.price || 0))
+  }))
+  const subtotal = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
+  const candidates = []
+
+  for (const offer of offers || []) {
+    if (!offer || offer.enabled !== true || offer.type === 'coupon') continue
+    if (offer.startDate && new Date(offer.startDate) > now) continue
+    if (offer.endDate && new Date(offer.endDate) < now) continue
+    if (subtotal < Number(offer.minimumPurchase || 0)) continue
+
+    let eligibleSubtotal = 0
+    if (offer.type === 'site-wide') {
+      eligibleSubtotal = subtotal
+    } else if (offer.type === 'product-wise') {
+      const selectedIds = new Set((offer.productIds || []).map(id => String(id?._id || id)))
+      eligibleSubtotal = cartItems.filter(item => selectedIds.has(item.id))
+        .reduce((sum, item) => sum + item.price * item.quantity, 0)
+    } else if (offer.type === 'bundle') {
+      const bundleIds = [...new Set((offer.bundleProductIds || []).map(id => String(id?._id || id)))]
+      if (bundleIds.length < 2) continue
+      const cartIds = new Set(cartItems.map(item => item.id))
+      if (!bundleIds.every(id => cartIds.has(id))) continue
+      const bundleQuantity = cartItems.filter(item => bundleIds.includes(item.id))
+        .reduce((sum, item) => sum + item.quantity, 0)
+      if (bundleQuantity < Math.max(1, Number(offer.minimumQuantity || 1))) continue
+      eligibleSubtotal = cartItems.filter(item => bundleIds.includes(item.id))
+        .reduce((sum, item) => sum + item.price * item.quantity, 0)
+    } else continue
+
+    if (eligibleSubtotal <= 0) continue
+    const value = Math.max(0, Number(offer.discountValue || 0))
+    const rawDiscount = offer.discountType === 'percentage'
+      ? eligibleSubtotal * value / 100
+      : value
+    const offerDiscount = Math.min(eligibleSubtotal, Math.max(0, Math.round(rawDiscount)))
+    if (offerDiscount > 0) candidates.push({ offer, discount: offerDiscount })
+  }
+
+  candidates.sort((a, b) => b.discount - a.discount)
+  const best = candidates[0]
+  return best ? {
+    discount: Math.min(subtotal, best.discount),
+    appliedOffer: {
+      offerId: best.offer._id,
+      type: best.offer.type,
+      title: best.offer.title,
+      discount: Math.min(subtotal, best.discount)
+    }
+  } : { discount: 0, appliedOffer: null }
+}
 
 const CUSTOMER_CARE_EMAIL = 'customercare@xaaj.in'
 
@@ -428,6 +489,73 @@ router.post(
     )
 
     // ========================================================
+    // APPLY THE BEST AUTOMATIC OFFER (server-side validation)
+    // Site-wide, product-wise and bundle offers apply to COD and
+    // Razorpay because they are calculated before payment handling.
+    // ========================================================
+    const nowForOffers = new Date()
+    const activeAutomaticOffers = await Offer.find({
+      type: { $in: ['site-wide', 'product-wise', 'bundle'] },
+      enabled: true,
+      $and: [
+        { $or: [{ startDate: null }, { startDate: { $lte: nowForOffers } }] },
+        { $or: [{ endDate: null }, { endDate: { $gte: nowForOffers } }] },
+        { $or: [{ usageLimit: null }, { $expr: { $lt: ['$usedCount', '$usageLimit'] } }, { usedCount: { $exists: false } }] }
+      ]
+    })
+    const automaticOfferResult = calculateAutomaticOfferDiscount(items, activeAutomaticOffers, nowForOffers)
+    const automaticOfferDiscount = Math.min(
+      Math.max(0, subtotal - discount),
+      Number(automaticOfferResult.discount || 0)
+    )
+    discount += automaticOfferDiscount
+    const appliedAutomaticOffer = automaticOfferResult.appliedOffer
+      ? { ...automaticOfferResult.appliedOffer, discount: automaticOfferDiscount }
+      : null
+
+    // ========================================================
+    // APPLY COUPON OFFER (server-side validation)
+    // The frontend sends only the code; price/discount are
+    // recalculated from database prices here.
+    // ========================================================
+
+    const couponCode = String(req.body.couponCode || '').trim().toUpperCase()
+    let appliedCoupon = null
+
+    if (couponCode) {
+      const now = new Date()
+      const coupon = await Offer.findOne({
+        type: 'coupon',
+        couponCode,
+        enabled: true,
+        $and: [
+          { $or: [{ startDate: null }, { startDate: { $lte: now } }] },
+          { $or: [{ endDate: null }, { endDate: { $gte: now } }] }
+        ]
+      })
+
+      if (!coupon) {
+        return res.status(400).json({ success: false, message: 'This coupon is invalid, inactive, or expired.' })
+      }
+
+      if (subtotal < Number(coupon.minimumPurchase || 0)) {
+        return res.status(400).json({
+          success: false,
+          message: `This coupon requires a minimum cart value of ₹${Number(coupon.minimumPurchase || 0).toLocaleString('en-IN')}.`
+        })
+      }
+
+      const eligibleSubtotal = Math.max(0, subtotal - discount)
+      const requestedDiscount = coupon.discountType === 'percentage'
+        ? eligibleSubtotal * Number(coupon.discountValue) / 100
+        : Number(coupon.discountValue)
+      const couponDiscount = Math.min(eligibleSubtotal, Math.max(0, Math.round(requestedDiscount)))
+
+      discount += couponDiscount
+      appliedCoupon = { offerId: coupon._id, code: coupon.couponCode, title: coupon.title, discount: couponDiscount }
+    }
+
+    // ========================================================
 
     // SHIPPING FEE
 
@@ -817,6 +945,11 @@ router.post(
 
       discount,
 
+      ...(appliedCoupon ? { appliedCoupon } : {}),
+      ...(appliedAutomaticOffer ? { appliedOffer: appliedAutomaticOffer } : {}),
+
+      couponCode: appliedCoupon?.code || '',
+
       shippingFee,
 
       total,
@@ -830,6 +963,51 @@ router.post(
         paymentMethod
 
     })
+
+    // ========================================================
+    // RESERVE COUPON USAGE FOR ACCEPTED COD ORDERS
+    // Razorpay usage is counted later, only after verified payment.
+    // The conditional update prevents exceeding a configured limit.
+    // ========================================================
+
+    if (paymentMethod === 'cod' && appliedCoupon?.offerId) {
+      const couponUsageFilter = {
+        _id: appliedCoupon.offerId,
+        type: 'coupon',
+        enabled: true
+      }
+
+      const currentCoupon = await Offer.findById(appliedCoupon.offerId)
+
+      if (!currentCoupon) {
+        await Order.deleteOne({ _id: order._id })
+        return res.status(409).json({
+          success: false,
+          message: 'The selected coupon is no longer available. Please try again.'
+        })
+      }
+
+      if (currentCoupon.usageLimit != null) {
+        couponUsageFilter.$or = [
+          { usedCount: { $lt: Number(currentCoupon.usageLimit) } },
+          { usedCount: { $exists: false } }
+        ]
+      }
+
+      const updatedCoupon = await Offer.findOneAndUpdate(
+        couponUsageFilter,
+        { $inc: { usedCount: 1 } },
+        { new: true }
+      )
+
+      if (!updatedCoupon) {
+        await Order.deleteOne({ _id: order._id })
+        return res.status(409).json({
+          success: false,
+          message: 'This coupon has reached its usage limit. Please choose another coupon.'
+        })
+      }
+    }
 
     // ========================================================
 

@@ -5,6 +5,7 @@ import mongoose from 'mongoose'
 import Order from '../models/Order.js'
 
 import Product from '../models/Product.js'
+import Offer from '../models/Offer.js'
 
 import User from '../models/User.js'
 
@@ -28,6 +29,66 @@ const router = Router()
 
 const CUSTOMER_CARE_EMAIL = 'customercare@xaaj.in'
 const CUSTOMER_CARE_PHONE = '+91 9899446117'
+
+
+// Calculate the best eligible automatic offer from database-backed rules.
+// Kept in this file so payments.js does not require an extra helper module.
+const calculateAutomaticOfferDiscount = (items, offers, now = new Date()) => {
+  const normalizedItems = (items || []).map(item => ({
+    id: String(item.product?._id || item.product || ''),
+    quantity: Math.max(1, Number(item.quantity || 1)),
+    price: Math.max(0, Number(item.price || 0))
+  }))
+  const subtotal = normalizedItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
+  const activeOffers = (offers || []).filter(offer => {
+    if (!offer || offer.enabled !== true || offer.type === 'coupon') return false
+    if (offer.startDate && new Date(offer.startDate) > now) return false
+    if (offer.endDate && new Date(offer.endDate) < now) return false
+    return subtotal >= Number(offer.minimumPurchase || 0)
+  })
+  const candidates = []
+  for (const offer of activeOffers) {
+    let eligibleSubtotal = 0
+    if (offer.type === 'site-wide') {
+      eligibleSubtotal = subtotal
+    } else if (offer.type === 'product-wise') {
+      const selectedIds = new Set((offer.productIds || []).map(value => String(value?._id || value)))
+      eligibleSubtotal = normalizedItems
+        .filter(item => selectedIds.has(item.id))
+        .reduce((sum, item) => sum + item.price * item.quantity, 0)
+    } else if (offer.type === 'bundle') {
+      const bundleIds = [...new Set((offer.bundleProductIds || []).map(value => String(value?._id || value)))]
+      if (bundleIds.length < 2) continue
+      const cartIds = new Set(normalizedItems.map(item => item.id))
+      if (!bundleIds.every(id => cartIds.has(id))) continue
+      const bundleQuantity = normalizedItems
+        .filter(item => bundleIds.includes(item.id))
+        .reduce((sum, item) => sum + item.quantity, 0)
+      if (bundleQuantity < Math.max(1, Number(offer.minimumQuantity || 0))) continue
+      eligibleSubtotal = normalizedItems
+        .filter(item => bundleIds.includes(item.id))
+        .reduce((sum, item) => sum + item.price * item.quantity, 0)
+    }
+    if (eligibleSubtotal <= 0) continue
+    const value = Math.max(0, Number(offer.discountValue || 0))
+    const rawDiscount = offer.discountType === 'percentage'
+      ? eligibleSubtotal * value / 100
+      : value
+    const offerDiscount = Math.min(eligibleSubtotal, Math.max(0, Math.round(rawDiscount)))
+    if (offerDiscount > 0) candidates.push({ offer, discount: offerDiscount })
+  }
+  candidates.sort((a, b) => b.discount - a.discount)
+  const best = candidates[0]
+  return {
+    discount: best ? Math.min(subtotal, best.discount) : 0,
+    appliedOffer: best ? {
+      offerId: best.offer._id,
+      type: best.offer.type,
+      title: best.offer.title,
+      discount: Math.min(subtotal, best.discount)
+    } : null
+  }
+}
 
 
 // ============================================================
@@ -335,10 +396,77 @@ router.post(
 
 
     // ========================================================
-    // DISCOUNT
+    // COUPON DISCOUNT (server-calculated)
+    // The browser may send a couponCode, but never sends a
+    // discount amount that the backend trusts.
     // ========================================================
 
-    const discount = 0
+    let discount = 0
+    let appliedCoupon = null
+    const now = new Date()
+
+    // Apply the best eligible automatic offer (site-wide, product-wise, or bundle).
+    // Prices and offer rules are read from the database, never trusted from the client.
+    const activeAutomaticOffers = await Offer.find({
+      type: { $in: ['site-wide', 'product-wise', 'bundle'] },
+      enabled: true,
+      $and: [
+        { $or: [{ startDate: null }, { startDate: { $exists: false } }, { startDate: { $lte: now } }] },
+        { $or: [{ endDate: null }, { endDate: { $exists: false } }, { endDate: { $gte: now } }] }
+      ]
+    })
+
+    const automaticOfferResult = calculateAutomaticOfferDiscount(items, activeAutomaticOffers, now)
+    discount = Math.min(subtotal, Math.max(0, Number(automaticOfferResult.discount || 0)))
+
+    const couponCode = String(req.body.couponCode || '').trim().toUpperCase()
+
+    if (couponCode) {
+      const couponEligibleSubtotal = Math.max(0, subtotal - discount)
+      const coupon = await Offer.findOne({
+        type: 'coupon',
+        couponCode,
+        enabled: true,
+        $and: [
+          { $or: [{ startDate: null }, { startDate: { $exists: false } }, { startDate: { $lte: now } }] },
+          { $or: [{ endDate: null }, { endDate: { $exists: false } }, { endDate: { $gte: now } }] }
+        ]
+      })
+
+      if (!coupon) {
+        return res.status(400).json({
+          success: false,
+          message: 'This coupon is invalid, expired, or currently unavailable.'
+        })
+      }
+
+      if (coupon.usageLimit != null && Number(coupon.usedCount || 0) >= Number(coupon.usageLimit)) {
+        return res.status(400).json({
+          success: false,
+          message: 'This coupon has reached its usage limit.'
+        })
+      }
+
+      if (subtotal < Number(coupon.minimumPurchase || 0)) {
+        return res.status(400).json({
+          success: false,
+          message: `Minimum purchase of ₹${Number(coupon.minimumPurchase || 0).toLocaleString('en-IN')} is required for this coupon.`
+        })
+      }
+
+      const rawDiscount = coupon.discountType === 'percentage'
+        ? couponEligibleSubtotal * Number(coupon.discountValue || 0) / 100
+        : Number(coupon.discountValue || 0)
+
+      const couponDiscount = Math.min(couponEligibleSubtotal, Math.max(0, Math.round(rawDiscount)))
+      discount = Math.min(subtotal, discount + couponDiscount)
+      appliedCoupon = {
+        offerId: coupon._id,
+        code: coupon.couponCode,
+        title: coupon.title,
+        discount: couponDiscount
+      }
+    }
 
 
     // ========================================================
@@ -605,6 +733,10 @@ router.post(
         subtotal,
 
         discount,
+
+        appliedCoupon,
+
+        couponCode: appliedCoupon?.code || '',
 
         shippingFee,
 
@@ -1029,6 +1161,51 @@ router.post(
 
           }
 
+
+          // ==================================================
+          // COUNT COUPON USAGE ONLY AFTER VERIFIED PAYMENT
+          // ==================================================
+          // This runs inside the same MongoDB transaction as the
+          // stock and payment updates. Already-paid orders return
+          // above, so retries do not increment usage twice.
+          if (order.appliedCoupon?.offerId) {
+            const couponFilter = {
+              _id: order.appliedCoupon.offerId,
+              type: 'coupon'
+            }
+
+            // Enforce usageLimit atomically when one is configured.
+            const coupon = await Offer.findById(
+              order.appliedCoupon.offerId
+            ).session(session)
+
+            if (!coupon) {
+              throw Object.assign(
+                new Error('The applied coupon could not be found.'),
+                { statusCode: 409 }
+              )
+            }
+
+            if (coupon.usageLimit != null) {
+              couponFilter.$or = [
+                { usedCount: { $lt: Number(coupon.usageLimit) } },
+                { usedCount: { $exists: false } }
+              ]
+            }
+
+            const updatedCoupon = await Offer.findOneAndUpdate(
+              couponFilter,
+              { $inc: { usedCount: 1 } },
+              { new: true, session }
+            )
+
+            if (!updatedCoupon) {
+              throw Object.assign(
+                new Error('This coupon has reached its usage limit. Please contact customer care before retrying payment.'),
+                { statusCode: 409 }
+              )
+            }
+          }
 
           // ==================================================
           // UPDATE PAYMENT
