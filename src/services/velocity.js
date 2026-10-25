@@ -8,170 +8,36 @@ const VELOCITY_BASE_URL =
   process.env.VELOCITY_BASE_URL ||
   'https://shazam.velocity.in'
 
-let cachedToken = null
-let tokenExpiresAt = 0
-
-const VELOCITY_USERNAME =
-  process.env.VELOCITY_USERNAME || ''
-
-const VELOCITY_PASSWORD =
-  process.env.VELOCITY_PASSWORD || ''
-
-const TOKEN_BUFFER_MS =
-  5 * 60 * 1000
+const VELOCITY_API_TOKEN =
+  (process.env.VELOCITY_API_TOKEN || '')
+    .trim()
+    .replace(/^Bearer\s+/i, '')
 
 // ============================================================
-// GET VELOCITY TOKEN
+// GET VELOCITY DASHBOARD API KEY
 // ============================================================
 
-export async function getVelocityToken(
-  forceRefresh = false
-) {
-  const now = Date.now()
-
-  // ----------------------------------------------------------
-  // USE CACHED TOKEN
-  // ----------------------------------------------------------
-
-  if (
-    !forceRefresh &&
-    cachedToken &&
-    tokenExpiresAt >
-      now + TOKEN_BUFFER_MS
-  ) {
-    return cachedToken
-  }
-
-  // ----------------------------------------------------------
-  // CHECK CREDENTIALS
-  // ----------------------------------------------------------
-
-  if (
-    !VELOCITY_USERNAME ||
-    !VELOCITY_PASSWORD
-  ) {
+export async function getVelocityToken() {
+  if (!VELOCITY_API_TOKEN) {
     throw Object.assign(
       new Error(
-        'Velocity Shipping credentials are not configured'
+        'Velocity dashboard API key is not configured. Set VELOCITY_API_TOKEN in the backend environment.'
       ),
       {
         statusCode: 503,
-        code:
-          'VELOCITY_NOT_CONFIGURED'
+        code: 'VELOCITY_NOT_CONFIGURED'
       }
     )
   }
 
-  try {
-    console.log(
-      '[VELOCITY] Requesting fresh authentication token...'
-    )
-
-    const response =
-      await axios.post(
-        `${VELOCITY_BASE_URL}/custom/api/v1/auth-token`,
-        {
-          username:
-            VELOCITY_USERNAME,
-
-          password:
-            VELOCITY_PASSWORD
-        },
-        {
-          headers: {
-            'Content-Type':
-              'application/json'
-          },
-
-          timeout: 30000
-        }
-      )
-
-    const token =
-      response.data?.token
-
-    const expiresAt =
-      response.data?.expires_at
-
-    if (!token) {
-      throw new Error(
-        'Velocity authentication succeeded but no token was returned'
-      )
-    }
-
-    // --------------------------------------------------------
-    // SAVE TOKEN
-    // --------------------------------------------------------
-
-    cachedToken = token
-
-    if (expiresAt) {
-      tokenExpiresAt =
-        new Date(
-          expiresAt
-        ).getTime()
-    } else {
-      // Fallback: 23 hours
-      tokenExpiresAt =
-        Date.now() +
-        23 * 60 * 60 * 1000
-    }
-
-    console.log(
-      '[VELOCITY] Authentication successful. Fresh token received.'
-    )
-
-    return cachedToken
-
-  } catch (error) {
-    const status =
-      error.response?.status
-
-    const responseData =
-      error.response?.data
-
-    console.error(
-      '[VELOCITY] Authentication failed:',
-      {
-        status,
-        response:
-          responseData,
-        message:
-          error.message
-      }
-    )
-
-    const message =
-      responseData?.error ||
-      responseData?.message ||
-      error.message ||
-      'Velocity authentication failed'
-
-    throw Object.assign(
-      new Error(message),
-      {
-        statusCode:
-          status || 502,
-
-        code:
-          'VELOCITY_AUTH_FAILED',
-
-        velocityResponse:
-          responseData
-      }
-    )
-  }
+  // Dashboard-generated keys are used directly; the old
+  // username/password token-generation endpoint is no longer used.
+  return VELOCITY_API_TOKEN
 }
 
 // ============================================================
 // COMMON VELOCITY REQUEST
-//
-// IMPORTANT:
-// Velocity documentation says:
-//
-// Authorization: your_token_here
-//
-// So we intentionally send the token directly.
+// Dashboard API keys use: Authorization: Bearer <your-token>
 // ============================================================
 
 export async function velocityRequest({
@@ -210,10 +76,8 @@ export async function velocityRequest({
             'Content-Type':
               'application/json',
 
-            // Velocity documentation:
-            // Authorization: your_token_here
             Authorization:
-              requestToken
+              `Bearer ${requestToken}`
           },
 
           data,
@@ -227,154 +91,46 @@ export async function velocityRequest({
     }
 
   // ==========================================================
-  // FIRST REQUEST
+  // REQUEST + ERROR HANDLING
   // ==========================================================
 
   try {
-
-    const response =
-      await makeRequest(token)
+    const response = await makeRequest(token)
 
     console.log(
       `[VELOCITY] ${endpoint} success`
     )
 
     return response.data
-
   } catch (error) {
-
-    const status =
-      error.response?.status
-
-    const responseData =
-      error.response?.data
-
-    // ========================================================
-    // 401 HANDLING
-    // ========================================================
-
-    if (status === 401) {
-
-      console.warn(
-        `[VELOCITY] ${endpoint} returned 401.`
-      )
-
-      console.warn(
-        '[VELOCITY] Cached token may be invalid/revoked. Requesting a fresh token and retrying once...'
-      )
-
-      // ------------------------------------------------------
-      // CLEAR OLD TOKEN
-      // ------------------------------------------------------
-
-      cachedToken = null
-      tokenExpiresAt = 0
-
-      try {
-
-        // ----------------------------------------------------
-        // GET FRESH TOKEN
-        // ----------------------------------------------------
-
-        token =
-          await getVelocityToken(
-            true
-          )
-
-        console.log(
-          `[VELOCITY] Retrying ${endpoint} with fresh token...`
-        )
-
-        // ----------------------------------------------------
-        // RETRY ONCE
-        // ----------------------------------------------------
-
-        const retryResponse =
-          await makeRequest(token)
-
-        console.log(
-          `[VELOCITY] ${endpoint} retry successful`
-        )
-
-        return retryResponse.data
-
-      } catch (retryError) {
-
-        const retryStatus =
-          retryError.response?.status
-
-        const retryData =
-          retryError.response?.data
-
-        console.error(
-          `[VELOCITY] ${endpoint} retry failed`,
-          {
-            status:
-              retryStatus,
-
-            response:
-              retryData,
-
-            message:
-              retryError.message
-          }
-        )
-
-        throw Object.assign(
-          new Error(
-            retryData?.message ||
-            retryData?.error ||
-            retryError.message ||
-            'Velocity API retry failed'
-          ),
-          {
-            statusCode:
-              retryStatus || 502,
-
-            code:
-              'VELOCITY_API_ERROR',
-
-            velocityResponse:
-              retryData
-          }
-        )
-      }
-    }
-
-    // ========================================================
-    // NON-401 ERROR
-    // ========================================================
+    const status = error.response?.status
+    const responseData = error.response?.data
 
     console.error(
       `[VELOCITY] ${endpoint} failed`,
       {
         status,
-
-        response:
-          responseData,
-
-        message:
-          error.message
+        response: responseData,
+        message: error.message
       }
     )
 
     const message =
-      responseData?.message ||
-      responseData?.error ||
-      error.message ||
-      'Velocity API request failed'
+      status === 401
+        ? 'Velocity API key was rejected (401). Generate or enable a valid key in the Velocity dashboard and update VELOCITY_API_TOKEN in the backend environment.'
+        : responseData?.message ||
+          responseData?.error ||
+          error.message ||
+          'Velocity API request failed'
 
     throw Object.assign(
       new Error(message),
       {
-        statusCode:
-          status || 502,
-
-        code:
-          'VELOCITY_API_ERROR',
-
-        velocityResponse:
-          responseData
+        statusCode: status || 502,
+        code: status === 401
+          ? 'VELOCITY_API_KEY_REJECTED'
+          : 'VELOCITY_API_ERROR',
+        velocityResponse: responseData
       }
     )
   }

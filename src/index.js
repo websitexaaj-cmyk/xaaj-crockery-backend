@@ -45,11 +45,14 @@ import paymentRoutes from './routes/payments.js'
 import uploadRoutes from './routes/uploads.js'
 import reviewRoutes from './routes/reviews.js'
 import offerRoutes from './routes/Offer.js'
+import createPromotionalPopupsRouter from './routes/promotionalPopups.js'
 
 // -------------------------
 // 5. Middleware
 // -------------------------
 import {
+  protect,
+  adminOnly,
   notFound,
   errorHandler
 } from './middleware/index.js'
@@ -491,6 +494,19 @@ app.use(
   '/api/uploads',
   writeLimiter,
   uploadRoutes
+)
+
+
+// ============================================================
+// Popup Promotional
+// Public active-popup reads use the existing public GET limiter.
+// Admin CRUD handlers use protect + adminOnly inside the router.
+// ============================================================
+
+app.use(
+  '/api/promotional-popups',
+  publicReadLimiter,
+  createPromotionalPopupsRouter({ protect, adminOnly })
 )
 
 
