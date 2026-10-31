@@ -59,7 +59,6 @@ export const uploadMedia = async (
       ? resourceType
       : 'auto'
 
-  // Buffer upload
   if (Buffer.isBuffer(file)) {
     const result = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
@@ -88,7 +87,6 @@ export const uploadMedia = async (
     }
   }
 
-  // String / Data URI upload
   if (typeof file !== 'string' || !file.trim()) {
     throw new Error('A valid image/video file is required')
   }
@@ -202,72 +200,108 @@ export const verifyRazorpaySignature = (
 // SMTP / EMAIL
 // ============================================================
 
-const smtpConfigured = Boolean(
-  process.env.SMTP_HOST &&
-  process.env.SMTP_PORT &&
-  process.env.SMTP_USER &&
-  process.env.SMTP_PASSWORD
-)
+// Create the transporter lazily. This ensures environment variables
+// are read when an email is sent, not when this module is first imported.
+// It also supports applications that load dotenv during server startup.
 
-// ============================================================
-// NODEMAILER
-// ============================================================
+export let mailer = null
+let mailerConfigKey = ''
 
-export const mailer = smtpConfigured
-  ? nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT),
-      secure: Number(process.env.SMTP_PORT) === 465,
+const getMailer = () => {
+  const host = process.env.SMTP_HOST?.trim()
+  const portValue = process.env.SMTP_PORT?.trim()
+  const user = process.env.SMTP_USER?.trim()
+  const password = process.env.SMTP_PASSWORD
+
+  const missingVariables = [
+    ['SMTP_HOST', host],
+    ['SMTP_PORT', portValue],
+    ['SMTP_USER', user],
+    ['SMTP_PASSWORD', password]
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name)
+
+  if (missingVariables.length > 0) {
+    throw new Error(
+      `SMTP is not configured. Missing environment variable(s): ${missingVariables.join(', ')}`
+    )
+  }
+
+  const port = Number(portValue)
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('SMTP_PORT must be a valid port number')
+  }
+
+  // SMTP_SECURE can explicitly override the default:
+  // port 465 uses implicit TLS; ports such as 587 use STARTTLS.
+  const secure =
+    process.env.SMTP_SECURE !== undefined
+      ? process.env.SMTP_SECURE.trim().toLowerCase() === 'true'
+      : port === 465
+
+  const currentConfigKey = [
+    host,
+    port,
+    user,
+    password,
+    secure
+  ].join('|')
+
+  if (!mailer || mailerConfigKey !== currentConfigKey) {
+    if (mailer) {
+      mailer.close()
+    }
+
+    mailer = nodemailer.createTransport({
+      host,
+      port,
+      secure,
       auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASSWORD
-      }
+        user,
+        pass: password
+      },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 20000,
+      ...(port === 587 && !secure
+        ? { requireTLS: true }
+        : {})
     })
-  : null
+
+    mailerConfigKey = currentConfigKey
+  }
+
+  return mailer
+}
 
 // ============================================================
 // SEND EMAIL
 // ============================================================
 
 export const sendEmail = async ({ to, subject, html, replyTo }) => {
-  if (!mailer) {
-    const missingVariables = [
-      ['SMTP_HOST', process.env.SMTP_HOST],
-      ['SMTP_PORT', process.env.SMTP_PORT],
-      ['SMTP_USER', process.env.SMTP_USER],
-      ['SMTP_PASSWORD', process.env.SMTP_PASSWORD]
-    ]
-      .filter(([, value]) => !value)
-      .map(([name]) => name)
-
-    const error = new Error(
-      `SMTP is not configured. Missing environment variable(s): ${missingVariables.join(', ') || 'unknown'}`
-    )
-
-    console.error('[XAAJ EMAIL] Configuration error:', error.message)
-    throw error
-  }
-
   if (!to || !subject || !html) {
     throw new Error('Email recipient, subject and HTML are required')
   }
 
+  const transporter = getMailer()
+
   const emailOptions = {
-    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    from: process.env.SMTP_FROM?.trim() || process.env.SMTP_USER?.trim(),
     to: String(to).trim(),
     subject,
     html
   }
 
-  // Reply-To is used by contact/B2B enquiry emails.
   if (replyTo) {
     emailOptions.replyTo = String(replyTo).trim().toLowerCase()
   }
 
   try {
-    const result = await mailer.sendMail(emailOptions)
+    const result = await transporter.sendMail(emailOptions)
 
-    console.log('[XAAJ EMAIL] Email accepted by SMTP provider', {
+    console.log('[XAAJ EMAIL] SMTP send result', {
       to: emailOptions.to,
       subject: emailOptions.subject,
       messageId: result.messageId,

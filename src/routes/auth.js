@@ -283,17 +283,23 @@ router.post(
 
       await exists.save()
 
-      await sendVerificationEmail(
-        exists,
-        otp
-      )
+      let emailSent = true
+
+      try {
+        await sendVerificationEmail(exists, otp)
+      } catch (emailError) {
+        emailSent = false
+        console.error('[REGISTER OTP EMAIL ERROR]:', emailError)
+      }
 
       return res.status(200).json({
         success: true,
         requiresEmailVerification: true,
         email: exists.email,
-        message:
-          'Your account is not verified. A new OTP has been sent to your email.'
+        emailSent,
+        message: emailSent
+          ? 'Your account is not verified. A new OTP has been sent to your email.'
+          : 'Your account exists, but the verification email could not be sent. Please try resending the OTP.'
       })
     }
 
@@ -355,10 +361,14 @@ router.post(
     // SEND OTP EMAIL
     // ----------------------------------------------------------
 
-    await sendVerificationEmail(
-      user,
-      otp
-    )
+    let emailSent = true
+
+    try {
+      await sendVerificationEmail(user, otp)
+    } catch (emailError) {
+      emailSent = false
+      console.error('[REGISTER OTP EMAIL ERROR]:', emailError)
+    }
 
     // ----------------------------------------------------------
     // ACCOUNT CREATED BUT NOT LOGGED IN
@@ -368,8 +378,10 @@ router.post(
       success: true,
       requiresEmailVerification: true,
       email: user.email,
-      message:
-        'Account created. Please verify your email using the OTP sent to your email.'
+      emailSent,
+      message: emailSent
+        ? 'Account created. Please verify your email using the OTP sent to your email.'
+        : 'Account created, but the verification email could not be sent. Please try resending the OTP.'
     })
   })
 )
@@ -539,17 +551,23 @@ router.post(
 
     await user.save()
 
-    await sendVerificationEmail(
-      user,
-      otp
-    )
+    let emailSent = true
 
-    return res.json({
-      success: true,
+    try {
+      await sendVerificationEmail(user, otp)
+    } catch (emailError) {
+      emailSent = false
+      console.error('[RESEND VERIFICATION EMAIL ERROR]:', emailError)
+    }
+
+    return res.status(emailSent ? 200 : 503).json({
+      success: !emailSent ? false : true,
       requiresEmailVerification: true,
       email: user.email,
-      message:
-        'A new verification OTP has been sent.'
+      emailSent,
+      message: emailSent
+        ? 'A new verification OTP has been sent.'
+        : 'Could not send the verification email. Please try again later.'
     })
   })
 )
