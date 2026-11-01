@@ -33,20 +33,52 @@ const CUSTOMER_CARE_PHONE = '+91 9899446117'
 
 // Calculate the best eligible automatic offer from database-backed rules.
 // Kept in this file so payments.js does not require an extra helper module.
-const calculateAutomaticOfferDiscount = (items, offers, now = new Date()) => {
+const calculateAutomaticOfferDiscount = (items, offers, products = [], now = new Date()) => {
   const normalizedItems = (items || []).map(item => ({
     id: String(item.product?._id || item.product || ''),
     quantity: Math.max(1, Number(item.quantity || 1)),
     price: Math.max(0, Number(item.price || 0))
   }))
   const subtotal = normalizedItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
+  const candidates = []
+
+  // Quantity discounts are treated as one automatic candidate.
+  let quantityDiscountTotal = 0
+  const quantityDiscountTitles = []
+  for (const item of normalizedItems) {
+    const product = (products || []).find(p => String(p._id) === item.id)
+    const rule = product?.quantityDiscount
+    if (!rule?.enabled || item.quantity < Number(rule.minQuantity || 1)) continue
+    const percentage = Math.max(0, Number(rule.discountPercent || 0))
+    const amount = Math.min(
+      item.price * item.quantity,
+      Math.round(item.price * item.quantity * percentage / 100)
+    )
+    if (amount > 0) {
+      quantityDiscountTotal += amount
+      quantityDiscountTitles.push(`${percentage}% quantity discount`)
+    }
+  }
+  if (quantityDiscountTotal > 0) {
+    candidates.push({
+      discount: Math.min(subtotal, quantityDiscountTotal),
+      appliedOffer: {
+        offerId: null,
+        type: 'quantity',
+        title: [...new Set(quantityDiscountTitles)].join(', '),
+        discount: Math.min(subtotal, quantityDiscountTotal)
+      }
+    })
+  }
+
   const activeOffers = (offers || []).filter(offer => {
     if (!offer || offer.enabled !== true || offer.type === 'coupon') return false
     if (offer.startDate && new Date(offer.startDate) > now) return false
     if (offer.endDate && new Date(offer.endDate) < now) return false
+    if (offer.usageLimit != null && Number(offer.usedCount || 0) >= Number(offer.usageLimit)) return false
     return subtotal >= Number(offer.minimumPurchase || 0)
   })
-  const candidates = []
+
   for (const offer of activeOffers) {
     let eligibleSubtotal = 0
     if (offer.type === 'site-wide') {
@@ -69,24 +101,31 @@ const calculateAutomaticOfferDiscount = (items, offers, now = new Date()) => {
         .filter(item => bundleIds.includes(item.id))
         .reduce((sum, item) => sum + item.price * item.quantity, 0)
     }
+
     if (eligibleSubtotal <= 0) continue
     const value = Math.max(0, Number(offer.discountValue || 0))
     const rawDiscount = offer.discountType === 'percentage'
       ? eligibleSubtotal * value / 100
       : value
     const offerDiscount = Math.min(eligibleSubtotal, Math.max(0, Math.round(rawDiscount)))
-    if (offerDiscount > 0) candidates.push({ offer, discount: offerDiscount })
+    if (offerDiscount > 0) {
+      candidates.push({
+        discount: offerDiscount,
+        appliedOffer: {
+          offerId: offer._id,
+          type: offer.type,
+          title: offer.title,
+          discount: offerDiscount
+        }
+      })
+    }
   }
+
   candidates.sort((a, b) => b.discount - a.discount)
   const best = candidates[0]
   return {
     discount: best ? Math.min(subtotal, best.discount) : 0,
-    appliedOffer: best ? {
-      offerId: best.offer._id,
-      type: best.offer.type,
-      title: best.offer.title,
-      discount: Math.min(subtotal, best.discount)
-    } : null
+    appliedOffer: best ? best.appliedOffer : null
   }
 }
 
@@ -416,13 +455,13 @@ router.post(
       ]
     })
 
-    const automaticOfferResult = calculateAutomaticOfferDiscount(items, activeAutomaticOffers, now)
+    const automaticOfferResult = calculateAutomaticOfferDiscount(items, activeAutomaticOffers, products, now)
+    let appliedOffer = automaticOfferResult.appliedOffer
     discount = Math.min(subtotal, Math.max(0, Number(automaticOfferResult.discount || 0)))
 
     const couponCode = String(req.body.couponCode || '').trim().toUpperCase()
 
     if (couponCode) {
-      const couponEligibleSubtotal = Math.max(0, subtotal - discount)
       const coupon = await Offer.findOne({
         type: 'coupon',
         couponCode,
@@ -454,12 +493,14 @@ router.post(
         })
       }
 
+      // A valid coupon replaces every automatic discount. Discounts never stack.
       const rawDiscount = coupon.discountType === 'percentage'
-        ? couponEligibleSubtotal * Number(coupon.discountValue || 0) / 100
+        ? subtotal * Number(coupon.discountValue || 0) / 100
         : Number(coupon.discountValue || 0)
 
-      const couponDiscount = Math.min(couponEligibleSubtotal, Math.max(0, Math.round(rawDiscount)))
-      discount = Math.min(subtotal, discount + couponDiscount)
+      const couponDiscount = Math.min(subtotal, Math.max(0, Math.round(rawDiscount)))
+      discount = couponDiscount
+      appliedOffer = null
       appliedCoupon = {
         offerId: coupon._id,
         code: coupon.couponCode,
@@ -735,6 +776,8 @@ router.post(
         discount,
 
         appliedCoupon,
+
+        appliedOffer,
 
         couponCode: appliedCoupon?.code || '',
 
@@ -1202,6 +1245,40 @@ router.post(
             if (!updatedCoupon) {
               throw Object.assign(
                 new Error('This coupon has reached its usage limit. Please contact customer care before retrying payment.'),
+                { statusCode: 409 }
+              )
+            }
+          }
+
+          // Count a selected automatic offer only after payment is verified.
+          // Quantity discounts are product rules and do not have an Offer document.
+          if (order.appliedOffer?.offerId) {
+            const offerFilter = {
+              _id: order.appliedOffer.offerId,
+              type: order.appliedOffer.type,
+              enabled: true
+            }
+            const automaticOffer = await Offer.findById(order.appliedOffer.offerId).session(session)
+            if (!automaticOffer) {
+              throw Object.assign(
+                new Error('The applied offer could not be found.'),
+                { statusCode: 409 }
+              )
+            }
+            if (automaticOffer.usageLimit != null) {
+              offerFilter.$or = [
+                { usedCount: { $lt: Number(automaticOffer.usageLimit) } },
+                { usedCount: { $exists: false } }
+              ]
+            }
+            const updatedOffer = await Offer.findOneAndUpdate(
+              offerFilter,
+              { $inc: { usedCount: 1 } },
+              { new: true, session }
+            )
+            if (!updatedOffer) {
+              throw Object.assign(
+                new Error('This offer has reached its usage limit. Please contact customer care before retrying payment.'),
                 { statusCode: 409 }
               )
             }

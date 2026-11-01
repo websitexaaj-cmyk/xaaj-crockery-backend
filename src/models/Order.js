@@ -1,11 +1,8 @@
+
 import mongoose from 'mongoose'
 
 // =====================================================
 // SHIPPING ADDRESS SNAPSHOT
-// =====================================================
-// Order create hone ke time customer ka address yahan
-// copy hoga. Baad mein user apna address change kare,
-// purane order ka address change nahi hoga.
 // =====================================================
 
 const shippingAddressSchema = new mongoose.Schema(
@@ -58,9 +55,6 @@ const itemSchema = new mongoose.Schema(
 // =====================================================
 // APPLIED COUPON SNAPSHOT
 // =====================================================
-// Coupon details are saved with the order so later edits
-// to the Offer document do not change historical orders.
-// =====================================================
 
 const appliedCouponSchema = new mongoose.Schema(
   {
@@ -75,6 +69,40 @@ const appliedCouponSchema = new mongoose.Schema(
       uppercase: true,
       maxlength: 50,
       default: ''
+    },
+    title: {
+      type: String,
+      trim: true,
+      maxlength: 150,
+      default: ''
+    },
+    discount: {
+      type: Number,
+      min: 0,
+      default: 0
+    }
+  },
+  { _id: false }
+)
+
+// =====================================================
+// APPLIED AUTOMATIC OFFER SNAPSHOT
+// =====================================================
+// Only the selected automatic offer is stored.
+// Quantity discount is also included in this system.
+// =====================================================
+
+const appliedOfferSchema = new mongoose.Schema(
+  {
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Offer',
+      default: null
+    },
+    type: {
+      type: String,
+      enum: ['site-wide', 'product-wise', 'bundle', 'quantity'],
+      default: null
     },
     title: {
       type: String,
@@ -123,11 +151,19 @@ const orderSchema = new mongoose.Schema(
     shippingFee: { type: Number, default: 0, min: 0 },
     total: { type: Number, required: true, min: 0 },
 
-    // Detailed coupon snapshot plus legacy couponCode field.
+    // Coupon snapshot
     appliedCoupon: {
       type: appliedCouponSchema,
       default: null
     },
+
+    // Selected automatic offer snapshot
+    appliedOffer: {
+      type: appliedOfferSchema,
+      default: null
+    },
+
+    // Legacy couponCode field
     couponCode: {
       type: String,
       default: '',

@@ -31,9 +31,9 @@ import {
 const router = Router()
 
 
-// Calculate the best eligible automatic offer on the server.
-// Kept in this file so no additional helper module is required.
-const calculateAutomaticOfferDiscount = (items, offers, now = new Date()) => {
+// Calculate the highest eligible automatic discount on the server.
+// Quantity discounts are treated as one automatic candidate and never stack.
+const calculateAutomaticOfferDiscount = (items, offers, products, now = new Date()) => {
   const cartItems = (items || []).map(item => ({
     id: String(item.product?._id || item.product || ''),
     quantity: Math.max(1, Number(item.quantity || 1)),
@@ -42,6 +42,44 @@ const calculateAutomaticOfferDiscount = (items, offers, now = new Date()) => {
   const subtotal = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
   const candidates = []
 
+  // Quantity discount candidate, calculated only from product settings in MongoDB.
+  const productById = new Map((products || []).map(product => [String(product._id), product]))
+  let quantityDiscountTotal = 0
+
+  for (const item of cartItems) {
+    const product = productById.get(item.id)
+    const quantityDiscount = product?.quantityDiscount
+    const minQuantity = Number(quantityDiscount?.minQuantity)
+    const discountPercent = Number(quantityDiscount?.discountPercent)
+
+    if (
+      quantityDiscount?.enabled === true &&
+      Number.isInteger(item.quantity) &&
+      item.quantity >= minQuantity &&
+      minQuantity >= 2 &&
+      discountPercent > 0 &&
+      discountPercent <= 100
+    ) {
+      quantityDiscountTotal += Math.round(
+        item.price * item.quantity * discountPercent / 100
+      )
+    }
+  }
+
+  quantityDiscountTotal = Math.min(subtotal, quantityDiscountTotal)
+  if (quantityDiscountTotal > 0) {
+    candidates.push({
+      offer: null,
+      discount: quantityDiscountTotal,
+      appliedOffer: {
+        offerId: null,
+        type: 'quantity',
+        title: 'Quantity Discount',
+        discount: quantityDiscountTotal
+      }
+    })
+  }
+
   for (const offer of offers || []) {
     if (!offer || offer.enabled !== true || offer.type === 'coupon') continue
     if (offer.startDate && new Date(offer.startDate) > now) continue
@@ -49,45 +87,70 @@ const calculateAutomaticOfferDiscount = (items, offers, now = new Date()) => {
     if (subtotal < Number(offer.minimumPurchase || 0)) continue
 
     let eligibleSubtotal = 0
+
     if (offer.type === 'site-wide') {
       eligibleSubtotal = subtotal
     } else if (offer.type === 'product-wise') {
       const selectedIds = new Set((offer.productIds || []).map(id => String(id?._id || id)))
-      eligibleSubtotal = cartItems.filter(item => selectedIds.has(item.id))
+      eligibleSubtotal = cartItems
+        .filter(item => selectedIds.has(item.id))
         .reduce((sum, item) => sum + item.price * item.quantity, 0)
     } else if (offer.type === 'bundle') {
       const bundleIds = [...new Set((offer.bundleProductIds || []).map(id => String(id?._id || id)))]
       if (bundleIds.length < 2) continue
+
       const cartIds = new Set(cartItems.map(item => item.id))
       if (!bundleIds.every(id => cartIds.has(id))) continue
-      const bundleQuantity = cartItems.filter(item => bundleIds.includes(item.id))
+
+      const bundleQuantity = cartItems
+        .filter(item => bundleIds.includes(item.id))
         .reduce((sum, item) => sum + item.quantity, 0)
+
       if (bundleQuantity < Math.max(1, Number(offer.minimumQuantity || 1))) continue
-      eligibleSubtotal = cartItems.filter(item => bundleIds.includes(item.id))
+
+      eligibleSubtotal = cartItems
+        .filter(item => bundleIds.includes(item.id))
         .reduce((sum, item) => sum + item.price * item.quantity, 0)
-    } else continue
+    } else {
+      continue
+    }
 
     if (eligibleSubtotal <= 0) continue
+
     const value = Math.max(0, Number(offer.discountValue || 0))
     const rawDiscount = offer.discountType === 'percentage'
       ? eligibleSubtotal * value / 100
       : value
     const offerDiscount = Math.min(eligibleSubtotal, Math.max(0, Math.round(rawDiscount)))
-    if (offerDiscount > 0) candidates.push({ offer, discount: offerDiscount })
+
+    if (offerDiscount > 0) {
+      candidates.push({
+        offer,
+        discount: offerDiscount,
+        appliedOffer: {
+          offerId: offer._id,
+          type: offer.type,
+          title: offer.title,
+          discount: offerDiscount
+        }
+      })
+    }
   }
 
   candidates.sort((a, b) => b.discount - a.discount)
   const best = candidates[0]
-  return best ? {
-    discount: Math.min(subtotal, best.discount),
-    appliedOffer: {
-      offerId: best.offer._id,
-      type: best.offer.type,
-      title: best.offer.title,
-      discount: Math.min(subtotal, best.discount)
-    }
-  } : { discount: 0, appliedOffer: null }
+
+  return best
+    ? {
+        discount: Math.min(subtotal, best.discount),
+        appliedOffer: {
+          ...best.appliedOffer,
+          discount: Math.min(subtotal, best.discount)
+        }
+      }
+    : { discount: 0, appliedOffer: null }
 }
+
 
 const CUSTOMER_CARE_EMAIL = 'customercare@xaaj.in'
 
@@ -324,7 +387,6 @@ router.post(
 
     const packageItems = []
 
-    let discount = 0
 
     for (const incomingItem of incoming) {
 
@@ -370,32 +432,6 @@ router.post(
 
         throw error
 
-      }
-
-      // ------------------------------------------------------
-
-      // QUANTITY-BASED DISCOUNT
-      // Calculate from product settings stored in MongoDB.
-      // Never trust discount values sent by the frontend.
-
-      // ------------------------------------------------------
-
-      const quantityDiscount = product.quantityDiscount
-
-      if (
-        quantityDiscount?.enabled === true &&
-        Number.isInteger(quantity) &&
-        quantity >= Number(quantityDiscount.minQuantity) &&
-        Number(quantityDiscount.discountPercent) > 0 &&
-        Number(quantityDiscount.discountPercent) <= 100
-      ) {
-        const itemDiscount =
-          (Number(product.price) *
-            quantity *
-            Number(quantityDiscount.discountPercent)) /
-          100
-
-        discount += Math.round(itemDiscount)
       }
 
       // ------------------------------------------------------
@@ -489,10 +525,12 @@ router.post(
     )
 
     // ========================================================
-    // APPLY THE BEST AUTOMATIC OFFER (server-side validation)
-    // Site-wide, product-wise and bundle offers apply to COD and
-    // Razorpay because they are calculated before payment handling.
+    // APPLY EXACTLY ONE DISCOUNT
+    // A valid coupon replaces all automatic discounts.
+    // Otherwise, select the highest eligible automatic candidate,
+    // including product quantity discounts.
     // ========================================================
+
     const nowForOffers = new Date()
     const activeAutomaticOffers = await Offer.find({
       type: { $in: ['site-wide', 'product-wise', 'bundle'] },
@@ -500,27 +538,27 @@ router.post(
       $and: [
         { $or: [{ startDate: null }, { startDate: { $lte: nowForOffers } }] },
         { $or: [{ endDate: null }, { endDate: { $gte: nowForOffers } }] },
-        { $or: [{ usageLimit: null }, { $expr: { $lt: ['$usedCount', '$usageLimit'] } }, { usedCount: { $exists: false } }] }
+        {
+          $or: [
+            { usageLimit: null },
+            { $expr: { $lt: ['$usedCount', '$usageLimit'] } },
+            { usedCount: { $exists: false } }
+          ]
+        }
       ]
     })
-    const automaticOfferResult = calculateAutomaticOfferDiscount(items, activeAutomaticOffers, nowForOffers)
-    const automaticOfferDiscount = Math.min(
-      Math.max(0, subtotal - discount),
-      Number(automaticOfferResult.discount || 0)
-    )
-    discount += automaticOfferDiscount
-    const appliedAutomaticOffer = automaticOfferResult.appliedOffer
-      ? { ...automaticOfferResult.appliedOffer, discount: automaticOfferDiscount }
-      : null
 
-    // ========================================================
-    // APPLY COUPON OFFER (server-side validation)
-    // The frontend sends only the code; price/discount are
-    // recalculated from database prices here.
-    // ========================================================
+    const automaticOfferResult = calculateAutomaticOfferDiscount(
+      items,
+      activeAutomaticOffers,
+      products,
+      nowForOffers
+    )
 
     const couponCode = String(req.body.couponCode || '').trim().toUpperCase()
+    let discount = 0
     let appliedCoupon = null
+    let appliedAutomaticOffer = null
 
     if (couponCode) {
       const now = new Date()
@@ -530,12 +568,22 @@ router.post(
         enabled: true,
         $and: [
           { $or: [{ startDate: null }, { startDate: { $lte: now } }] },
-          { $or: [{ endDate: null }, { endDate: { $gte: now } }] }
+          { $or: [{ endDate: null }, { endDate: { $gte: now } }] },
+          {
+            $or: [
+              { usageLimit: null },
+              { $expr: { $lt: ['$usedCount', '$usageLimit'] } },
+              { usedCount: { $exists: false } }
+            ]
+          }
         ]
       })
 
       if (!coupon) {
-        return res.status(400).json({ success: false, message: 'This coupon is invalid, inactive, or expired.' })
+        return res.status(400).json({
+          success: false,
+          message: 'This coupon is invalid, inactive, expired, or has reached its usage limit.'
+        })
       }
 
       if (subtotal < Number(coupon.minimumPurchase || 0)) {
@@ -545,14 +593,23 @@ router.post(
         })
       }
 
-      const eligibleSubtotal = Math.max(0, subtotal - discount)
+      // Coupon is exclusive. Calculate it on the original subtotal.
       const requestedDiscount = coupon.discountType === 'percentage'
-        ? eligibleSubtotal * Number(coupon.discountValue) / 100
+        ? subtotal * Number(coupon.discountValue) / 100
         : Number(coupon.discountValue)
-      const couponDiscount = Math.min(eligibleSubtotal, Math.max(0, Math.round(requestedDiscount)))
 
-      discount += couponDiscount
-      appliedCoupon = { offerId: coupon._id, code: coupon.couponCode, title: coupon.title, discount: couponDiscount }
+      discount = Math.min(subtotal, Math.max(0, Math.round(requestedDiscount)))
+      appliedCoupon = {
+        offerId: coupon._id,
+        code: coupon.couponCode,
+        title: coupon.title,
+        discount
+      }
+    } else {
+      discount = Math.min(subtotal, Number(automaticOfferResult.discount || 0))
+      appliedAutomaticOffer = automaticOfferResult.appliedOffer
+        ? { ...automaticOfferResult.appliedOffer, discount }
+        : null
     }
 
     // ========================================================
@@ -579,7 +636,7 @@ router.post(
 
     // DISCOUNT
 
-    // Calculated above from each eligible product's saved settings.
+    // Exactly one selected discount is applied above.
 
     // ========================================================
 
