@@ -85,10 +85,37 @@ app.use(helmet())
 // 9. CORS Configuration
 // ============================================================
 
+// Allow both the www and non-www production website origins.
+// CORS compares origins exactly, so these must be listed separately.
+const allowedOrigins = [
+  'https://xaaj.in',
+  'https://www.xaaj.in'
+]
+
 app.use(
   cors({
-    origin: env.clientUrl,
-    credentials: true
+    origin: (origin, callback) => {
+      // Requests without an Origin header (for example, server-to-server
+      // or command-line requests) are not blocked by the browser CORS policy.
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true)
+      }
+
+      return callback(new Error('Not allowed by CORS'))
+    },
+    credentials: true,
+    methods: [
+      'GET',
+      'POST',
+      'PUT',
+      'PATCH',
+      'DELETE',
+      'OPTIONS'
+    ],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization'
+    ]
   })
 )
 
