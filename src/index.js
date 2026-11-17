@@ -91,7 +91,7 @@ app.use(helmet())
 const allowedOrigins = [
   'https://xaaj.in',
   'https://www.xaaj.in',
-  'http://localhost:5173'
+  //'http://localhost:5173'
 ]
 
 app.use(
