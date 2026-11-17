@@ -310,7 +310,7 @@ export const productSchema = z.object({
 
         .regex(
 
-          /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
+          /^[a-z0-9]+(?:-[a-z0-9]+)\*$/,
 
           'Product slug can contain only lowercase letters, numbers and hyphens'
 
@@ -373,8 +373,8 @@ export const productSchema = z.object({
         'Tea Set',
 
         'Tea Cup Set',
-            'Serving Set'
 
+            'Serving Set'
 
       ])
 
@@ -399,6 +399,26 @@ export const productSchema = z.object({
           /^\d{4}(?:\d{2})?(?:\d{2})?$/,
 
           'HSN code must contain 4, 6, or 8 digits'
+
+        ),
+
+      // ------------------------------------------------------
+
+      // EAN (UNIQUE 13-DIGIT PRODUCT BARCODE NUMBER)
+
+      // ------------------------------------------------------
+
+      ean: z
+
+        .string()
+
+        .trim()
+
+        .regex(
+
+          /^\d{13}$/,
+
+          'EAN must contain exactly 13 digits'
 
         ),
 
@@ -455,28 +475,47 @@ export const productSchema = z.object({
         .default(0),
 
       // Quantity-based discount
+
       quantityDiscount: z
+
         .object({
+
           enabled: z.boolean().default(false),
 
           minQuantity: z.coerce
+
             .number()
+
             .int('Minimum quantity must be a whole number')
+
             .min(2, 'Minimum quantity must be at least 2')
+
             .default(2),
 
           discountPercent: z.coerce
+
             .number()
+
             .finite('Quantity discount must be a valid number')
+
             .min(0, 'Quantity discount cannot be negative')
+
             .max(100, 'Quantity discount cannot exceed 100%')
+
             .default(10)
+
         })
+
         .optional()
+
         .default({
+
           enabled: false,
+
           minQuantity: 2,
+
           discountPercent: 10
+
         }),
 
       // Selling price
@@ -856,18 +895,29 @@ export const productSchema = z.object({
       }
 
       // Quantity discount validation
+
       const quantityDiscount = data.quantityDiscount
 
       if (
+
         quantityDiscount?.enabled &&
+
         quantityDiscount.discountPercent <= 0
+
       ) {
+
         ctx.addIssue({
+
           code: z.ZodIssueCode.custom,
+
           path: ['quantityDiscount', 'discountPercent'],
+
           message:
+
             'Enabled quantity discount must be greater than 0%'
+
         })
+
       }
 
       // ------------------------------------------------------
@@ -903,6 +953,7 @@ export const productSchema = z.object({
         'Tea Set',
 
         'Tea Cup Set',
+
           'Serving Set'
 
       ]

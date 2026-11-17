@@ -88,9 +88,6 @@ const appliedCouponSchema = new mongoose.Schema(
 // =====================================================
 // APPLIED AUTOMATIC OFFER SNAPSHOT
 // =====================================================
-// Only the selected automatic offer is stored.
-// Quantity discount is also included in this system.
-// =====================================================
 
 const appliedOfferSchema = new mongoose.Schema(
   {
@@ -117,6 +114,55 @@ const appliedOfferSchema = new mongoose.Schema(
     }
   },
   { _id: false }
+)
+
+// =====================================================
+// SHIPPING STATUS HISTORY
+// =====================================================
+
+const shippingHistorySchema = new mongoose.Schema(
+  {
+    status: {
+      type: String,
+      trim: true,
+      required: true,
+      maxlength: 100
+    },
+    subStatus: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: 150
+    },
+    description: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: 500
+    },
+    location: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: 200
+    },
+    source: {
+      type: String,
+      enum: ['velocity', 'admin', 'system'],
+      default: 'velocity'
+    },
+    eventId: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: 200
+    },
+    occurredAt: {
+      type: Date,
+      default: Date.now
+    }
+  },
+  { _id: true }
 )
 
 // =====================================================
@@ -198,11 +244,33 @@ const orderSchema = new mongoose.Schema(
     paymentProvider: { type: String, default: '', trim: true },
     paymentReference: { type: String, default: '', trim: true },
 
+    // =================================================
+    // STOCK MANAGEMENT
+    // =================================================
+
+    stockDeducted: {
+      type: Boolean,
+      default: false
+    },
+
+    stockRestored: {
+      type: Boolean,
+      default: false
+    },
+
     razorpayOrderId: { type: String, default: '', trim: true, index: true },
     razorpayPaymentId: { type: String, default: '', trim: true },
 
+    // =================================================
+    // COURIER DETAILS
+    // =================================================
+
     courierName: { type: String, default: '', trim: true, maxlength: 100 },
     trackingNumber: { type: String, default: '', trim: true, maxlength: 150 },
+
+    // =================================================
+    // VELOCITY SHIPPING DETAILS
+    // =================================================
 
     velocityOrderId: { type: String, default: '', trim: true, index: true },
     velocityShipmentId: { type: String, default: '', trim: true, index: true },
@@ -212,7 +280,28 @@ const orderSchema = new mongoose.Schema(
     velocityStatus: { type: String, default: '', trim: true },
     velocitySubStatus: { type: String, default: '', trim: true },
     velocityExpectedDelivery: { type: Date, default: null },
-    velocityLastSyncedAt: { type: Date, default: null }
+    velocityLastSyncedAt: { type: Date, default: null },
+
+    velocityDeliveredAt: {
+      type: Date,
+      default: null
+    },
+
+    velocityLastEventId: {
+      type: String,
+      default: '',
+      trim: true,
+      maxlength: 200
+    },
+
+    // =================================================
+    // AUTOMATIC SHIPPING STATUS HISTORY
+    // =================================================
+
+    shippingHistory: {
+      type: [shippingHistorySchema],
+      default: []
+    }
   },
   { timestamps: true }
 )

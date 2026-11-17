@@ -383,6 +383,12 @@ router.post(
 
               product.name,
 
+            // Order-time EAN snapshot for accurate historical sales reports.
+            ean:
+
+              String(product.ean || '').trim(),
+
+
             image:
 
               product.images?.[0] || '',
@@ -797,6 +803,12 @@ router.post(
 
           'razorpay',
 
+        // Explicit payment mode snapshot for admin sales reports.
+        paymentMode:
+
+          'razorpay',
+
+
         razorpayOrderId:
 
           razorpayOrder.id
@@ -842,6 +854,80 @@ router.post(
 
 )
 
+
+// ============================================================
+// CANCEL / FAIL RAZORPAY PAYMENT ATTEMPT
+// ============================================================
+// Called when the customer closes the checkout modal or Razorpay
+// reports a failed payment. Never cancel an order if Razorpay has
+// already authorized or captured a payment.
+router.post(
+  '/cancel',
+  protect,
+  asyncHandler(async (req, res) => {
+    const orderId = String(req.body?.razorpay_order_id || '').trim()
+    const reason = String(req.body?.reason || 'checkout_closed').trim()
+
+    if (!orderId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Razorpay order ID is required.'
+      })
+    }
+
+    const order = await Order.findOne({
+      user: req.user.id,
+      razorpayOrderId: orderId,
+      paymentProvider: 'razorpay'
+    })
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment order not found.'
+      })
+    }
+
+    if (order.paymentStatus === 'paid' || order.status === 'confirmed') {
+      return res.status(409).json({
+        success: false,
+        message: 'This payment is already successful. The order cannot be cancelled here.'
+      })
+    }
+
+    // Verify the current payment state directly with Razorpay.
+    // If this check fails, do not change the database state.
+    const paymentResult = await razorpay.orders.fetchPayments(orderId)
+    const payments = Array.isArray(paymentResult?.items) ? paymentResult.items : []
+    const hasSuccessfulOrPendingPayment = payments.some(payment =>
+      ['authorized', 'captured'].includes(String(payment?.status || '').toLowerCase())
+    )
+
+    if (hasSuccessfulOrPendingPayment) {
+      return res.status(409).json({
+        success: false,
+        message: 'A payment is already authorized or captured. Please wait for payment verification.'
+      })
+    }
+
+    // Idempotent update: repeated modal-dismiss / failure events are safe.
+    if (order.paymentStatus !== 'paid') {
+      order.status = 'cancelled'
+      order.paymentStatus = 'failed'
+      await order.save()
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Unsuccessful payment attempt updated.',
+      data: {
+        orderId: order._id,
+        status: order.status,
+        paymentStatus: order.paymentStatus
+      }
+    })
+  })
+)
 
 // ============================================================
 // VERIFY RAZORPAY PAYMENT
@@ -1042,6 +1128,19 @@ router.post(
             return
 
           }
+
+          // A cancelled/failed attempt must not be verified later.
+          // A fresh checkout creates a new Razorpay order.
+          if (
+            order.status === 'cancelled' ||
+            order.paymentStatus === 'failed'
+          ) {
+            throw Object.assign(
+              new Error('This payment attempt was cancelled or failed. Please start checkout again.'),
+              { statusCode: 409 }
+            )
+          }
+
 
 
           // ==================================================
@@ -1285,6 +1384,15 @@ router.post(
           }
 
           // ==================================================
+          // MARK STOCK AS DEDUCTED
+          // ==================================================
+          // Stock was decremented above in this same transaction.
+          // These flags allow the existing stock-restoration logic
+          // to identify this order if restoration is needed later.
+          order.stockDeducted = true
+          order.stockRestored = false
+
+          // ==================================================
           // UPDATE PAYMENT
           // ==================================================
 
@@ -1296,6 +1404,12 @@ router.post(
           order.paymentProvider =
 
             'razorpay'
+
+           order.paymentMode =
+
+             'razorpay'
+
+
 
 
           order.paymentReference =

@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
 
 import User from '../models/User.js'
+import Order from '../models/Order.js'
 import { env } from '../config/env.js'
 
 import {
@@ -1064,6 +1065,97 @@ router.post(
       message:
         'Logged out successfully'
     })
+)
+
+
+// ============================================================
+// ADMIN CUSTOMER DIRECTORY
+// Returns registered customer accounts, including customers
+// who have not placed an order yet.
+// ============================================================
+
+router.get(
+  '/customers',
+  protect,
+  asyncHandler(async (req, res) => {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      })
+    }
+
+    const users = await User.find({ role: 'customer' })
+      .select('name email addresses emailVerified isActive lastLoginAt createdAt updatedAt')
+      .sort({ createdAt: -1 })
+      .lean()
+
+    const userIds = users.map(user => user._id)
+    const orders = userIds.length
+      ? await Order.find({ user: { $in: userIds } })
+          .select('_id user total status createdAt shippingAddress items')
+          .sort({ createdAt: -1 })
+          .lean()
+      : []
+
+    const ordersByUser = new Map()
+
+    for (const order of orders) {
+      const userId = String(order.user?._id || order.user || '')
+      if (!userId) continue
+      if (!ordersByUser.has(userId)) ordersByUser.set(userId, [])
+      ordersByUser.get(userId).push(order)
+    }
+
+    const customers = users.map(user => {
+      const customerOrders = ordersByUser.get(String(user._id)) || []
+      const latestOrder = customerOrders[0] || null
+      const savedAddresses = Array.isArray(user.addresses) ? user.addresses : []
+      const latestOrderAddress = latestOrder?.shippingAddress || {}
+
+      const addresses = savedAddresses.map(address => ({
+        _id: address._id,
+        label: address.label || 'Address',
+        name: address.name || user.name,
+        line1: address.line1 || '',
+        line2: address.line2 || '',
+        city: address.city || '',
+        state: address.state || '',
+        postalCode: address.postalCode || '',
+        phone: address.phone || ''
+      }))
+
+      const totalSpent = customerOrders.reduce((sum, order) => {
+        const status = String(order.status || '').toLowerCase()
+        if (status === 'cancelled') return sum
+        return sum + Number(order.total || 0)
+      }, 0)
+
+      return {
+        id: String(user._id),
+        _id: String(user._id),
+        name: user.name || 'Customer',
+        email: user.email || '',
+        phone: addresses[0]?.phone || latestOrderAddress.phone || '',
+        emailVerified: Boolean(user.emailVerified),
+        isActive: user.isActive !== false,
+        registeredAt: user.createdAt || null,
+        lastLoginAt: user.lastLoginAt || null,
+        addresses,
+        address: addresses[0] || latestOrderAddress || {},
+        orders: customerOrders.length,
+        totalSpent,
+        lastOrder: latestOrder?.createdAt || null,
+        orderHistory: customerOrders
+      }
+    })
+
+    return res.json({
+      success: true,
+      count: customers.length,
+      data: customers
+    })
+  })
 )
 
 // ============================================================

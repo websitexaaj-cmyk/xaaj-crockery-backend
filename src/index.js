@@ -36,6 +36,7 @@ import productRoutes from './routes/products.js'
 import commerceRoutes from './routes/commerce.js'
 import orderRoutes from './routes/orders.js'
 import velocityTestRoutes from './routes/velocityTest.js'
+import velocityWebhookRoutes from './routes/velocityWebhook.js'
 import cmsRoutes from './routes/cms.js'
 import blogRoutes from './routes/blogs.js'
 import newsletterRoutes from './routes/newsletter.js'
@@ -89,7 +90,8 @@ app.use(helmet())
 // CORS compares origins exactly, so these must be listed separately.
 const allowedOrigins = [
   'https://xaaj.in',
-  'https://www.xaaj.in'
+  'https://www.xaaj.in',
+  'http://localhost:5173'
 ]
 
 app.use(
@@ -534,6 +536,19 @@ app.use(
   '/api/promotional-popups',
   publicReadLimiter,
   createPromotionalPopupsRouter({ protect, adminOnly })
+)
+
+
+// ============================================================
+// Velocity Shipping Webhook
+// Velocity server-to-server events update order shipment status.
+// Keep this route separate from the normal write rate limiter because
+// Velocity may retry webhook delivery when it does not receive success.
+// ============================================================
+
+app.use(
+  '/api/shipping',
+  velocityWebhookRoutes
 )
 
 

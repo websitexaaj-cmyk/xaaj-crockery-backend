@@ -1,4 +1,3 @@
-
 import mongoose from 'mongoose'
 
 const productSchema = new mongoose.Schema(
@@ -81,7 +80,7 @@ const productSchema = new mongoose.Schema(
         'Serving Platter',
         'Tea Set',
         'Tea Cup Set',
-         'Serving Set' 
+        'Serving Set'
       ],
       default: '',
       trim: true
@@ -97,6 +96,18 @@ const productSchema = new mongoose.Schema(
         'HSN code must contain 4, 6, or 8 digits.'
       ],
       index: true
+    },
+
+    // EAN (UNIQUE 13-DIGIT PRODUCT BARCODE NUMBER)
+    ean: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      match: [
+        /^\d{13}$/,
+        'EAN must contain exactly 13 digits.'
+      ]
     },
 
     // MRP / ORIGINAL PRICE
@@ -293,6 +304,22 @@ productSchema.pre('validate', function validateSubcategory() {
   }
 
   this.subcategory = subcategory
+})
+
+// VALIDATE EAN
+productSchema.pre('validate', function validateEan() {
+  if (this.ean === undefined || this.ean === null) {
+    return
+  }
+
+  this.ean = String(this.ean).trim()
+
+  if (!/^\d{13}$/.test(this.ean)) {
+    this.invalidate(
+      'ean',
+      'EAN must contain exactly 13 digits.'
+    )
+  }
 })
 
 // VALIDATE REGULAR DISCOUNT

@@ -1,5 +1,7 @@
 import { Router } from 'express'
 
+import mongoose from 'mongoose'
+
 import Product from '../models/Product.js'
 
 import User from '../models/User.js'
@@ -29,6 +31,115 @@ import {
 } from '../services/velocity.js'
 
 const router = Router()
+
+
+// ============================================================
+// STOCK HELPERS
+// COD stock reservation and cancellation restoration are
+// transactional and protected against duplicate operations.
+// ============================================================
+
+async function createOrderWithStockReservation(orderData, items, reserveStock) {
+  if (!reserveStock) {
+    const [order] = await Order.create([{
+      ...orderData,
+      stockDeducted: false,
+      stockRestored: false
+    }])
+    return order
+  }
+
+  const session = await mongoose.startSession()
+  let createdOrder = null
+
+  try {
+    await session.withTransaction(async () => {
+      const quantitiesByProduct = new Map()
+
+      for (const item of items) {
+        const productId = String(item.product)
+        quantitiesByProduct.set(
+          productId,
+          (quantitiesByProduct.get(productId) || 0) + Number(item.quantity)
+        )
+      }
+
+      for (const [productId, quantity] of quantitiesByProduct) {
+        const updatedProduct = await Product.findOneAndUpdate(
+          {
+            _id: productId,
+            isActive: true,
+            stock: { $gte: quantity }
+          },
+          { $inc: { stock: -quantity } },
+          { new: true, session }
+        )
+
+        if (!updatedProduct) {
+          const product = await Product.findById(productId).session(session)
+          throw Object.assign(
+            new Error(
+              product
+                ? `${product.name} does not have enough stock. Please refresh your cart.`
+                : 'A product in your cart is no longer available.'
+            ),
+            { statusCode: 409 }
+          )
+        }
+      }
+
+      const [order] = await Order.create([{
+        ...orderData,
+        stockDeducted: true,
+        stockRestored: false
+      }], { session })
+
+      createdOrder = order
+    })
+
+    return createdOrder
+  } finally {
+    await session.endSession()
+  }
+}
+
+async function restoreOrderStockOnce(orderId) {
+  const session = await mongoose.startSession()
+
+  try {
+    await session.withTransaction(async () => {
+      const order = await Order.findById(orderId).session(session)
+
+      if (!order || !order.stockDeducted || order.stockRestored) {
+        return
+      }
+
+      const quantitiesByProduct = new Map()
+
+      for (const item of order.items || []) {
+        const productId = String(item.product)
+        quantitiesByProduct.set(
+          productId,
+          (quantitiesByProduct.get(productId) || 0) + Number(item.quantity)
+        )
+      }
+
+      for (const [productId, quantity] of quantitiesByProduct) {
+        await Product.updateOne(
+          { _id: productId },
+          { $inc: { stock: quantity } },
+          { session }
+        )
+      }
+
+      order.stockRestored = true
+      await order.save({ session })
+    })
+  } finally {
+    await session.endSession()
+  }
+}
+
 
 
 // Calculate the highest eligible automatic discount on the server.
@@ -220,6 +331,146 @@ router.get(
   })
 
 )
+
+
+// ============================================================
+// ADMIN SALES REPORT
+// GET /orders/sales-report
+// Filters: date range, offer type, payment mode and order status.
+// Product-level rows are returned so each SKU/EAN is traceable.
+// ============================================================
+
+router.get(
+  '/sales-report',
+  protect,
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const {
+      startDate,
+      endDate,
+      offerType,
+      paymentMode,
+      status
+    } = req.query
+
+    const filter = {}
+
+    if (startDate || endDate) {
+      filter.createdAt = {}
+      if (startDate) {
+        const start = new Date(startDate)
+        if (Number.isNaN(start.getTime())) {
+          return res.status(400).json({ success: false, message: 'Invalid start date' })
+        }
+        start.setHours(0, 0, 0, 0)
+        filter.createdAt.$gte = start
+      }
+      if (endDate) {
+        const end = new Date(endDate)
+        if (Number.isNaN(end.getTime())) {
+          return res.status(400).json({ success: false, message: 'Invalid end date' })
+        }
+        end.setHours(23, 59, 59, 999)
+        filter.createdAt.$lte = end
+      }
+    }
+
+    if (status && status !== 'all') filter.status = status
+    if (paymentMode && paymentMode !== 'all') {
+      filter.paymentProvider = String(paymentMode).toLowerCase()
+    }
+
+    const orders = await Order.find(filter)
+      .populate('user', 'name email customerNumber')
+      .populate('items.product', 'name ean')
+      .sort({ createdAt: -1 })
+      .lean()
+
+    const normalizedOfferType = String(offerType || 'all').toLowerCase()
+    const filteredOrders = orders.filter(order => {
+      if (normalizedOfferType === 'all') return true
+      const type = order.appliedCoupon
+        ? 'coupon'
+        : (order.appliedOffer?.type || 'none')
+      return type === normalizedOfferType
+    })
+
+    const validRevenueOrders = filteredOrders.filter(order =>
+      order.status !== 'cancelled' &&
+      !['failed', 'refunded'].includes(String(order.paymentStatus || '').toLowerCase())
+    )
+
+    const productRows = []
+    const customerIds = new Set()
+    const productIds = new Set()
+
+    for (const order of filteredOrders) {
+      const customer = order.shippingAddress || {}
+      const user = order.user || {}
+      const customerId = String(user._id || order.user || '')
+      if (customerId) customerIds.add(customerId)
+
+      const offerApplied = order.appliedCoupon
+        ? `Coupon: ${order.appliedCoupon.code || order.appliedCoupon.title || 'Applied'}`
+        : order.appliedOffer?.title || ''
+
+      const paymentModeValue = String(order.paymentProvider || '').toUpperCase()
+      const invoiceNo = order.invoiceNumber || `XAAJ-${String(order._id).slice(-8).toUpperCase()}`
+      const customerNo = order.customerNumber || user.customerNumber || customerId || ''
+
+      for (const item of order.items || []) {
+        const product = item.product && typeof item.product === 'object'
+          ? item.product
+          : null
+        const productId = String(product?._id || item.product || '')
+        if (productId) productIds.add(productId)
+
+        productRows.push({
+          invoiceNo,
+          customerNo,
+          customerName: customer.name || user.name || '',
+          mobileNo: customer.phone || '',
+          email: customer.email || user.email || '',
+          productName: item.name || product?.name || '',
+          ean: item.ean || product?.ean || '',
+          quantity: Number(item.quantity || 0),
+          discount: Number(order.discount || 0),
+          gst: Number(order.gstAmount || 0),
+          totalAmount: Number(order.total || 0),
+          paymentMode: paymentModeValue,
+          paymentStatus: order.paymentStatus || '',
+          status: order.status || '',
+          offerApplied,
+          offerType: order.appliedCoupon ? 'coupon' : (order.appliedOffer?.type || 'none'),
+          orderDate: order.createdAt || null,
+          orderId: String(order._id),
+          orderRevenueEligible: validRevenueOrders.some(validOrder =>
+            String(validOrder._id) === String(order._id)
+          )
+        })
+      }
+    }
+
+    const summary = {
+      totalOrders: filteredOrders.length,
+      customers: customerIds.size,
+      productsSold: productRows.reduce((sum, row) => sum + row.quantity, 0),
+      revenue: validRevenueOrders.reduce((sum, order) => sum + Number(order.total || 0), 0),
+      discount: filteredOrders.reduce((sum, order) => sum + Number(order.discount || 0), 0),
+      gst: filteredOrders.reduce((sum, order) => sum + Number(order.gstAmount || 0), 0)
+    }
+
+    res.json({
+      success: true,
+      data: {
+        summary,
+        rows: productRows,
+        note: 'GST is reported only when gstAmount is stored on the order. Historical orders without stored GST, invoice number, customer number or EAN may show blank/zero or a generated display fallback.'
+      }
+    })
+  })
+)
+
 
 // ============================================================
 
@@ -445,6 +696,8 @@ router.post(
         product: product._id,
 
         name: product.name,
+
+        ean: product.ean || '',
 
         image: product.images?.[0] || '',
 
@@ -990,36 +1243,25 @@ router.post(
 
     // ========================================================
 
-    const order = await Order.create({
-
-      user: req.user.id,
-
+    const order = await createOrderWithStockReservation(
+      {
+        user: req.user.id,
+        items,
+        shippingAddress,
+        subtotal,
+        discount,
+        ...(appliedCoupon ? { appliedCoupon } : {}),
+        ...(appliedAutomaticOffer ? { appliedOffer: appliedAutomaticOffer } : {}),
+        couponCode: appliedCoupon?.code || '',
+        shippingFee,
+        total,
+        status: 'pending',
+        paymentStatus: 'pending',
+        paymentProvider: paymentMethod
+      },
       items,
-
-      shippingAddress,
-
-      subtotal,
-
-      discount,
-
-      ...(appliedCoupon ? { appliedCoupon } : {}),
-      ...(appliedAutomaticOffer ? { appliedOffer: appliedAutomaticOffer } : {}),
-
-      couponCode: appliedCoupon?.code || '',
-
-      shippingFee,
-
-      total,
-
-      status: 'pending',
-
-      paymentStatus: 'pending',
-
-      paymentProvider:
-
-        paymentMethod
-
-    })
+      paymentMethod === 'cod'
+    )
 
     // ========================================================
     // RESERVE COUPON USAGE FOR ACCEPTED COD ORDERS
@@ -1037,6 +1279,7 @@ router.post(
       const currentCoupon = await Offer.findById(appliedCoupon.offerId)
 
       if (!currentCoupon) {
+        await restoreOrderStockOnce(order._id)
         await Order.deleteOne({ _id: order._id })
         return res.status(409).json({
           success: false,
@@ -1058,6 +1301,7 @@ router.post(
       )
 
       if (!updatedCoupon) {
+        await restoreOrderStockOnce(order._id)
         await Order.deleteOne({ _id: order._id })
         return res.status(409).json({
           success: false,
@@ -1288,133 +1532,68 @@ length:
 
         // ----------------------------------------------------
 
+        // Velocity returns shipment details inside `payload`.
+        // Keep fallbacks for alternate response wrappers.
         const velocityData =
-
+          velocityResult?.payload ||
+          velocityResult?.data?.payload ||
           velocityResult?.data ||
-
+          velocityResult?.result?.payload ||
           velocityResult?.result ||
-
           velocityResult ||
-
           {}
 
-        // ----------------------------------------------------
-
-        // VELOCITY ORDER ID
-
-        // ----------------------------------------------------
-
+        // Velocity's order ID is different from our MongoDB order ID.
         order.velocityOrderId =
-
           velocityData?.order_id ||
-
           velocityData?.external_order_id ||
-
+          order.velocityOrderId ||
           String(order._id)
 
-        // ----------------------------------------------------
-
-        // SHIPMENT ID
-
-        // ----------------------------------------------------
-
         order.velocityShipmentId =
-
           velocityData?.shipment_id ||
-
           velocityData?.shipment?.id ||
-
           velocityData?.id ||
-
+          order.velocityShipmentId ||
           ''
-
-        // ----------------------------------------------------
-
-        // AWB
-
-        // ----------------------------------------------------
 
         order.velocityAwb =
-
           velocityData?.awb_code ||
-
           velocityData?.awb ||
-
           velocityData?.tracking_number ||
-
+          order.velocityAwb ||
           ''
-
-        // ----------------------------------------------------
-
-        // CARRIER
-
-        // ----------------------------------------------------
 
         order.velocityCarrierId =
-
+          velocityData?.courier_company_id ||
           velocityData?.carrier_id ||
-
           velocityData?.carrier?.id ||
-
+          order.velocityCarrierId ||
           ''
-
-        // ----------------------------------------------------
-
-        // TRACKING URL
-
-        // ----------------------------------------------------
-
-        order.velocityTrackingUrl =
-
-          velocityData?.tracking_url ||
-
-          velocityData?.track_url ||
-
-          velocityData?.label_url ||
-
-          ''
-
-        // ----------------------------------------------------
-
-        // COURIER
-
-        // ----------------------------------------------------
 
         order.courierName =
-
           velocityData?.courier_name ||
-
           velocityData?.courier?.name ||
-
+          order.courierName ||
           ''
 
-        // ----------------------------------------------------
-
-        // TRACKING NUMBER
-
-        // ----------------------------------------------------
+        // label_url is a shipping-label PDF, not a tracking page.
+        order.velocityTrackingUrl =
+          velocityData?.tracking_url ||
+          velocityData?.track_url ||
+          order.velocityTrackingUrl ||
+          ''
 
         order.trackingNumber =
+          order.velocityAwb || order.trackingNumber || ''
 
-          order.velocityAwb || ''
-
-        // ----------------------------------------------------
-
-        // VELOCITY STATUS
-
-        // ----------------------------------------------------
-
+        // API status 1 means the request succeeded, not shipment tracking status.
         order.velocityStatus =
-
-          velocityData?.status ||
-
           velocityData?.shipment_status ||
-
+          velocityData?.order_status ||
           'created'
 
-        order.velocityLastSyncedAt =
-
-          new Date()
+        order.velocityLastSyncedAt = new Date()
 
         await order.save()
 
@@ -1819,8 +1998,10 @@ router.patch(
 
     // ========================================================
 
-    order.status = 'cancelled'
+    await restoreOrderStockOnce(order._id)
 
+    order.status = 'cancelled'
+    order.stockRestored = Boolean(order.stockDeducted)
     await order.save()
 
     // ========================================================
@@ -2234,6 +2415,11 @@ router.patch(
     // UPDATE STATUS
 
     // ========================================================
+
+    if (status === 'cancelled' && oldStatus !== 'cancelled') {
+      await restoreOrderStockOnce(order._id)
+      order.stockRestored = Boolean(order.stockDeducted)
+    }
 
     order.status = status
 

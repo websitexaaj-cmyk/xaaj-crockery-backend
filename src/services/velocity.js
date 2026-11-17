@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { timingSafeEqual } from 'node:crypto'
 
 // ============================================================
 // VELOCITY CONFIG
@@ -498,6 +499,34 @@ export async function initiateVelocityRto(
 }
 
 // ============================================================
+// VELOCITY WEBHOOK AUTHENTICATION
+// ============================================================
+
+// Keep this secret separate from VELOCITY_API_TOKEN.
+// Configure VELOCITY_WEBHOOK_SECRET in the backend environment.
+
+export function verifyVelocityWebhookKey(providedKey) {
+  const configuredKey = (
+    process.env.VELOCITY_WEBHOOK_SECRET || ''
+  ).trim()
+
+  const incomingKey = String(providedKey || '').trim()
+
+  if (!configuredKey || !incomingKey) {
+    return false
+  }
+
+  const configuredBuffer = Buffer.from(configuredKey, 'utf8')
+  const incomingBuffer = Buffer.from(incomingKey, 'utf8')
+
+  if (configuredBuffer.length !== incomingBuffer.length) {
+    return false
+  }
+
+  return timingSafeEqual(configuredBuffer, incomingBuffer)
+}
+
+// ============================================================
 // DEFAULT EXPORT
 // ============================================================
 
@@ -540,5 +569,6 @@ export default {
 
   reattemptVelocityShipment,
 
-  initiateVelocityRto
+  initiateVelocityRto,
+  verifyVelocityWebhookKey
 }
